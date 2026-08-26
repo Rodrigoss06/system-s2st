@@ -97,10 +97,12 @@ class PunctuationCommitter:
 # F2 - los cuatro triggers
 # ---------------------------------------------------------------------------
 
-# 800 ms sin texto final nuevo. Fijado por el documento tecnico, seccion 5. Se probo
-# alargarlo a 2.5 s cuando el turn-detector dice que la idea no cierra: empeoro el
-# TTFA P90 de 3668 a 4291 ms, porque la espera se suma integra a la latencia. Revertido.
-TIMEOUT_S: Final[float] = 0.800
+# El documento tecnico, seccion 5, fija 800 ms. Medido a 400 ms sobre el fixture de
+# 10 min, dos corridas de ~45 turnos cada una: P50 3616 -> 2890 ms y P90 4752 -> 4097
+# ms, con las fronteras de segmento **identicas**. Ver D36.
+# Se probo tambien alargarlo a 2.5 s cuando el turn-detector dice que la idea no
+# cierra: empeoro el P90 a 4291 ms. Revertido.
+TIMEOUT_S: Final[float] = 0.400
 
 # Guardas de no-corte. Si el fragmento termina en una de estas, el hablante no ha
 # terminado la idea aunque Deepgram haya cerrado el fragmento y aunque haya silencio.

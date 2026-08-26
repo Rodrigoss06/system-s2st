@@ -677,3 +677,93 @@ instantanea y el error de mapeo aflora con signo negativo.
 Es el limite de resolucion de la medida, y conviene tenerlo presente al leer percentiles
 de TTFA muy bajos. No se corrige con un `max(0, ...)`: eso ocultaria el margen en vez de
 mostrarlo.
+
+## 2026-08-26 - Ajuste de latencia, post-F6
+
+### D36. `TIMEOUT_S` de M4 baja de 800 a 400 ms
+
+Cambio medido, no supuesto. Dos corridas de 210 s por configuracion sobre
+`es_10min.wav`, ~45 turnos cada una:
+
+| `TIMEOUT_S` | P50 | P90 |
+|---|---|---|
+| 0.800 | 3564 / 3668 ms | 4416 / 5087 ms |
+| **0.400** | **2918 / 2866 ms** | **4132 / 4062 ms** |
+
+Media de las dos corridas: **P50 −726 ms, P90 −655 ms**.
+
+**Sin coste en calidad.** Se comparo el texto de los segmentos con las dos
+configuraciones sobre el mismo audio y las fronteras salen **identicas**. Los cortes a
+media frase que se ven no los causa el timeout: los causa `eou` (ver abajo).
+
+El documento tecnico fija 800 ms en la seccion 5. Es un desvio consciente respaldado por
+medida; si la seccion 5 gana, se revierte con una constante.
+
+### D37. Los cortes a media frase vienen de `eou`, no del timeout
+
+Hallazgo del mismo experimento, y corrige una atribucion mia equivocada. Con el mismo
+audio y las dos configuraciones de timeout, estos cortes aparecen **igual**:
+
+```
+"...revisar el presupuesto de operaciones"  |  "antes del 4 de enero de 2027..."
+"...atendimos 16 solicitudes nuevas"        |  "y resolvimos casi todas el mismo dia."
+"...el equipo de Trujillo supero"           |  "su objetivo mensual."
+"...para abril depende de que"              |  "cerremos 21 acuerdos mas."
+```
+
+Los dispara el turn-detector: son fragmentos **gramaticalmente completos** que el hablante
+continua. `"Necesitamos revisar el presupuesto de operaciones"` es una oracion valida, el
+modelo la puntua como fin de turno, y la subordinada que venia detras se parte.
+
+Las guardas de no-corte no pueden atraparlo: miran si el fragmento **termina** en
+conjuncion, preposicion o articulo, y `"operaciones"` es un final legitimo. La senal que
+faltaria esta en la palabra **siguiente**, que aun no existe cuando hay que decidir.
+
+**Es el proximo objetivo de latencia y de calidad a la vez.** Palancas posibles, ninguna
+medida todavia:
+
+1. Subir el umbral de `eou` por encima del `unlikely_threshold` de `languages.json`
+   (es: 0.0058). Menos cortes, mas espera.
+2. Exigir `speech_final` **ademas** de `eou` para cerrar. Hoy `speech_final` corrobora
+   pero `eou` puede disparar sin el.
+3. Dar al turn-detector mas contexto: hoy se le pasa solo el fragmento pendiente, no los
+   turnos anteriores, y `predict_end_of_turn` acepta un `ChatContext` completo.
+
+### D38. Bajar el `endpointing` de Deepgram NO sirve: medido y descartado
+
+Una primera medida con n=8 sugeria que bajar de 300 a 200 ms ahorraba 224 ms. **Con n=40
+el resultado se invierte:**
+
+```
+endpointing=300  p50  851ms  p90 1722ms  sd 447
+endpointing=200  p50  766ms  p90 2338ms  sd 628
+endpointing=150  p50  806ms  p90 2285ms  sd 665
+```
+
+La mediana mejora 95 ms pero el **P90 empeora 616 ms** y la dispersion crece un 40 %.
+Confirmado end-to-end: P90 de 4662 a 6054 ms. Con menos silencio exigido Deepgram cierra
+fragmentos antes, produce mas por frase, y el committer tiene que acumular mas.
+
+Como el criterio de F2 es P90, el cambio es una perdida neta. **Revertido a 300.**
+
+La leccion, que costo dos medidas contradictorias: con n=8 cualquier diferencia de
+percentil es ruido.
+
+### D39. Los 150-300 ms que anuncia Deepgram no son el tiempo hasta `is_final`
+
+Confusion que conviene dejar escrita porque invita a buscar el problema donde no esta.
+
+Deepgram anuncia latencia de **procesado**: de recibir un chunk a emitir transcripcion
+para ese chunk. Eso se cumple, y se ve en los parciales. Pero `is_final` exige ademas que
+Deepgram **observe `endpointing` ms de silencio despues de la ultima palabra**, y esa
+espera se suma por definicion.
+
+Medido desde el fin de la ultima palabra hasta que llega `is_final`, n=40:
+**p50 851 ms, p90 1722 ms**, con minimo de 370 ms.
+
+Descomposicion aproximada: ~300 ms de endpointing + ~200 ms de procesado + ~180 ms de red
+(Deepgram esta a 177 ms de TCP desde Arequipa) + jitter.
+
+**El gate de VAD no tiene la culpa.** Se sospecho que recortar el silencio dejaba a
+Deepgram sin material para endpointar. Medido: 1009 ms con gate contra 1023 ms sin el.
+Sin diferencia; el hangover de 160 ms le basta.
