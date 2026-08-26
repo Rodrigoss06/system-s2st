@@ -1,0 +1,45 @@
+[project]
+name = "sincro-engine"
+version = "3.0.0"
+description = "Motor de doblaje voz a voz en tiempo real con clonacion de timbre"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "livekit-agents>=1.0",
+    "livekit-plugins-silero>=1.0",
+    "livekit-plugins-deepgram>=1.0",
+    "livekit-plugins-openai>=1.0",
+    "livekit-plugins-fishaudio>=1.0",
+    "livekit-plugins-turn-detector>=1.0",
+    "sounddevice>=0.4.6",
+    "soundfile>=0.12.1",
+    "numpy>=1.26",
+    "python-dotenv>=1.0",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["mypy>=1.11", "ruff>=0.6"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sincro"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+packages = ["sincro"]
+mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = ["soundfile", "sounddevice"]
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "ASYNC", "PYI", "RUF"]

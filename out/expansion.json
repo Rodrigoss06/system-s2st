@@ -1,0 +1,19 @@
+{
+  "measured_utc": "2026-08-26T09:34:00Z",
+  "llm_model": "qwen/qwen3.6-27b",
+  "note": "medidos sobre duracion de audio real, F5. Los 8 pares con ja no usan presupuesto de bytes y no figuran. Los 12 pares de aqui NO estan afectados por los bugs D28/D29, que solo tocan japones.",
+  "pairs": {
+    "es->en": 0.971,
+    "es->pt-BR": 0.854,
+    "es->fr": 1.066,
+    "en->es": 1.013,
+    "en->pt-BR": 1.079,
+    "en->fr": 1.269,
+    "pt-BR->es": 1.174,
+    "pt-BR->en": 1.235,
+    "pt-BR->fr": 1.387,
+    "fr->es": 0.982,
+    "fr->en": 1.048,
+    "fr->pt-BR": 1.077
+  }
+}
