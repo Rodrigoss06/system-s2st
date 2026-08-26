@@ -267,10 +267,12 @@ La seccion 9 no los lista, igual que no listaba `check.py`. Son los puntos de en
 `make dub-file` y `make report`. La orquestacion asincrona real vive en `engine.py`, que
 es F2; `dub_file.py` es una cascada secuencial que no la sustituye.
 
-### D13. Directiva para F2: M3 usa el SDK oficial de Deepgram - NO IMPLEMENTADA
+### D13. Directiva para F2: M3 usa el SDK oficial de Deepgram - CUMPLIDA en F2 y F6
 
-Registrada aqui para que F2 no repita el analisis de D7. **No se implementa en esta
-tarea**: el camino WebSocket de M3 es F2.
+Registrada al cerrar F1 para que F2 no repitiera el analisis de D7. **Se cumplio:**
+`DeepgramStreamTranscriber` usa `from deepgram import AsyncDeepgramClient`, y M3 no
+importa `livekit-plugins-deepgram` en ningun camino. La tercera razon de abajo, la
+reconexion con backoff, se implemento en F6 (D32).
 
 Cuando F2 migre M3 a streaming, debe usar el **SDK oficial de Deepgram**, no
 `livekit-plugins-deepgram`. Tres razones:
