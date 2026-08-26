@@ -94,7 +94,7 @@ async def run_live(
     )
 
     def on_turn(r: TurnResult) -> None:
-        tag = " [DROP]" if r.dropped else ""
+        tag = " [DROP]" if r.dropped else (" [SUBTITULO: TTS caido]" if r.tts_failed else "")
         print(
             f"\n[{r.seg.trigger:<11}] TTFA {r.ttfa_ms:>5} ms   "
             f"drift {engine.drift:+.2f}s{tag}"
@@ -186,6 +186,13 @@ async def run_live(
     print(f"  parciales  : {committer.dropped_partials} descartados (compuerta is_final)")
     print(f"  gate       : {gate.stats}")
     print(f"  stt        : {transcriber.partials} parciales, {transcriber.finals} finales")
+    print(
+        f"  red        : {transcriber.reconnects} reconexiones, "
+        f"{transcriber.downtime_s:.1f}s sin socket, "
+        f"{transcriber.frames_replayed} frames reenviados, "
+        f"{transcriber.frames_dropped_overflow} descartados por buffer lleno"
+    )
+    print(f"  tts        : {st.tts_failures} turnos degradados a subtitulo")
     print(f"  telemetry  : {writer.path}")
     print("=" * 72)
 

@@ -11,6 +11,7 @@ import bisect
 import contextlib
 import logging
 import time
+from collections import deque
 from collections.abc import AsyncIterator
 from typing import Any, Final
 
@@ -173,6 +174,16 @@ class DeepgramTranscriber:
 DG_ENDPOINTING_MS: Final[int] = 300
 DG_UTTERANCE_END_MS: Final[int] = 1000
 WS_MAX_RETRIES: Final[int] = 5
+WS_BACKOFF_BASE_S: Final[float] = 0.5
+WS_BACKOFF_MAX_S: Final[float] = 8.0
+
+# Audio que se guarda mientras el socket esta caido. Con 30 s se cubre de sobra el corte
+# de 5 s del criterio de F6; mas alla, el audio viejo ya no sirve para doblar en vivo.
+WS_BUFFER_S: Final[float] = 30.0
+# Ventana que se reenvia al reconectar: el audio posterior al ultimo `is_final` recibido.
+# Deepgram no confirma que proceso, asi que sin este reenvio el segmento a medias se
+# pierde, que es justo lo que el criterio prohibe.
+WS_REPLAY_S: Final[float] = 10.0
 
 
 class DeepgramStreamTranscriber:
@@ -193,11 +204,33 @@ class DeepgramStreamTranscriber:
         self.partials = 0
         self.finals = 0
         self.reconnects = 0
+        self.frames_buffered = 0
+        self.frames_replayed = 0
+        self.frames_dropped_overflow = 0
+        self.downtime_s = 0.0
+        self.connected = False
+        # Segundos de audio enviados en total, sumando todas las conexiones. Deepgram
+        # reinicia sus timestamps en cada socket nuevo, asi que hay que llevar el
+        # desplazamiento aparte o el TTFA se descuadra despues de reconectar.
+        self._sent_total = 0.0
+        self._conn_offset = 0.0
+        self._blocked_until = 0.0
         # (segundos de audio enviados, t_capture de ese frame). El gate descarta silencio
         # y frames muteados, asi que el reloj de Deepgram, que cuenta audio recibido, va
         # mas lento que el de pared. Sin este mapeo el TTFA sale inflado.
         self._sent_s: list[float] = []
         self._capture_s: list[float] = []
+
+    def simulate_network_drop(self, seconds: float) -> None:
+        """Corta el socket y bloquea la reconexion durante `seconds`.
+
+        Es la inyeccion de fallo de `make soak`. No toca la red del sistema: reproduce
+        exactamente lo que ve el motor cuando el WebSocket se cae, que es lo que el
+        riesgo R5 describe.
+        """
+        self._blocked_until = time.monotonic() + seconds
+        self.connected = False
+        logger.warning("simulated network drop: blocking reconnect for %.1fs", seconds)
 
     def capture_time_for(self, stream_time: float) -> float | None:
         """Traduce un timestamp de la linea temporal de Deepgram a t_capture real."""
@@ -228,11 +261,14 @@ class DeepgramStreamTranscriber:
         transcript = alt.transcript or ""
         if not transcript.strip():
             return None
+        # Deepgram reinicia sus timestamps en cada socket. Sumar el desplazamiento de
+        # la conexion los devuelve a una linea temporal continua entre reconexiones.
+        off = self._conn_offset
         words = [
             Word(
                 text=w.punctuated_word or w.word,
-                start=float(w.start),
-                end=float(w.end),
+                start=float(w.start) + off,
+                end=float(w.end) + off,
                 confidence=float(w.confidence),
             )
             for w in (alt.words or [])
@@ -249,67 +285,162 @@ class DeepgramStreamTranscriber:
     async def stream(
         self, frames: AsyncIterator[SpeechFrame]
     ) -> AsyncIterator[TranscriptEvent]:
-        """Abre el WebSocket y multiplexa envio de audio y recepcion de eventos.
+        """Streaming con reconexion automatica y buffer de audio (F6, riesgo R5).
 
-        La reconexion con buffer es F6 (R5). Aqui se reintenta la apertura con backoff,
-        pero una caida a mitad de sesion todavia termina el stream.
+        Tres piezas cooperando:
+
+        - un colector consume `frames` sin parar, tambien mientras el socket esta caido,
+          para que el microfono no se atasque;
+        - un buffer acotado guarda ese audio, descartando lo mas viejo si el corte se
+          alarga, porque en tiempo real el audio viejo ya no sirve;
+        - una ventana de reenvio conserva el audio posterior al ultimo `is_final`, y se
+          reinyecta al reconectar para no perder el segmento que estaba a medias.
         """
         from deepgram import AsyncDeepgramClient
 
         client = AsyncDeepgramClient(api_key=self._api_key)
         sample_rate = 16_000
 
-        async with client.listen.v1.connect(
-            model=MODEL,
-            language=self.deepgram_code,
-            encoding="linear16",
-            sample_rate=sample_rate,
-            channels=1,
-            interim_results=True,
-            punctuate=True,
-            smart_format=True,
-            endpointing=DG_ENDPOINTING_MS,
-            utterance_end_ms=DG_UTTERANCE_END_MS,
-            vad_events=True,
-        ) as conn:
-            self.t_stream_start = time.monotonic()
-            logger.info(
-                "deepgram ws open: model=%s language=%s endpointing=%dms",
-                MODEL,
-                self.deepgram_code,
-                DG_ENDPOINTING_MS,
-            )
+        pending: deque[SpeechFrame] = deque()
+        replay: deque[SpeechFrame] = deque()
+        arrived = asyncio.Event()
+        source_done = False
 
-            sent = 0.0
+        def buffer_seconds(q: deque[SpeechFrame]) -> float:
+            return sum(f.pcm.size for f in q) / sample_rate
 
-            async def pump_audio() -> None:
-                nonlocal sent
+        async def collect() -> None:
+            nonlocal source_done
+            try:
+                async for f in frames:
+                    pending.append(f)
+                    self.frames_buffered += 1
+                    while buffer_seconds(pending) > WS_BUFFER_S:
+                        pending.popleft()
+                        self.frames_dropped_overflow += 1
+                    arrived.set()
+            finally:
+                source_done = True
+                arrived.set()
+
+        collector = asyncio.create_task(collect())
+        attempt = 0
+        # Instante en que se perdio el socket. Se cierra al reconectar, no al abrir:
+        # medirlo desde la apertura sumaba la vida entera de la conexion.
+        down_since: float | None = None
+        self.t_stream_start = time.monotonic()
+
+        try:
+            while not (source_done and not pending):
+                now = time.monotonic()
+                if now < self._blocked_until:
+                    await asyncio.sleep(min(0.2, self._blocked_until - now))
+                    continue
+
                 try:
-                    async for f in frames:
-                        self._sent_s.append(sent)
-                        self._capture_s.append(f.t_capture)
-                        sent += f.pcm.size / f.sample_rate
-                        await conn.send_media(f.pcm.tobytes())
+                    async with client.listen.v1.connect(
+                        model=MODEL,
+                        language=self.deepgram_code,
+                        encoding="linear16",
+                        sample_rate=sample_rate,
+                        channels=1,
+                        interim_results=True,
+                        punctuate=True,
+                        smart_format=True,
+                        endpointing=DG_ENDPOINTING_MS,
+                        utterance_end_ms=DG_UTTERANCE_END_MS,
+                        vad_events=True,
+                    ) as conn:
+                        self.connected = True
+                        if down_since is not None:
+                            self.downtime_s += time.monotonic() - down_since
+                            down_since = None
+                        attempt = 0
+                        self._conn_offset = self._sent_total
+                        if replay:
+                            # Se reinyecta lo no confirmado antes que el audio nuevo.
+                            pending.extendleft(reversed(replay))
+                            self.frames_replayed += len(replay)
+                            logger.info(
+                                "reconnected, replaying %.2fs of unconfirmed audio",
+                                buffer_seconds(replay),
+                            )
+                            replay.clear()
+                        logger.info(
+                            "deepgram ws open: model=%s language=%s offset=%.2fs",
+                            MODEL,
+                            self.deepgram_code,
+                            self._conn_offset,
+                        )
+
+                        async def pump() -> None:
+                            while True:
+                                if not pending:
+                                    if source_done:
+                                        with contextlib.suppress(Exception):
+                                            await conn.send_close_stream()
+                                        return
+                                    arrived.clear()
+                                    await arrived.wait()
+                                    continue
+                                f = pending.popleft()
+                                await conn.send_media(f.pcm.tobytes())
+                                self._sent_s.append(self._sent_total)
+                                self._capture_s.append(f.t_capture)
+                                self._sent_total += f.pcm.size / f.sample_rate
+                                replay.append(f)
+                                while buffer_seconds(replay) > WS_REPLAY_S:
+                                    replay.popleft()
+
+                        pumper = asyncio.create_task(pump())
+                        try:
+                            async for msg in conn:
+                                if time.monotonic() < self._blocked_until:
+                                    raise TranscriptionError("simulated drop")
+                                ev = self._to_event(msg)
+                                if ev is None:
+                                    continue
+                                if ev.is_final:
+                                    self.finals += 1
+                                    # Confirmado: ya no hay que reenviarlo.
+                                    replay.clear()
+                                else:
+                                    self.partials += 1
+                                yield ev
+                        finally:
+                            pumper.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await pumper
+                    if source_done and not pending:
+                        break
                 except asyncio.CancelledError:
                     raise
-                except Exception:
-                    logger.exception("audio pump failed")
-                finally:
-                    with contextlib.suppress(Exception):
-                        await conn.send_close_stream()
-
-            pump = asyncio.create_task(pump_audio())
-            try:
-                async for msg in conn:
-                    ev = self._to_event(msg)
-                    if ev is None:
-                        continue
-                    if ev.is_final:
-                        self.finals += 1
-                    else:
-                        self.partials += 1
-                    yield ev
-            finally:
-                pump.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await pump
+                except Exception as e:
+                    self.connected = False
+                    if down_since is None:
+                        down_since = time.monotonic()
+                    if source_done and not pending:
+                        break
+                    attempt += 1
+                    self.reconnects += 1
+                    if attempt > WS_MAX_RETRIES:
+                        raise TranscriptionError(
+                            f"deepgram ws failed after {WS_MAX_RETRIES} reconnects: {e}"
+                        ) from e
+                    delay = min(WS_BACKOFF_BASE_S * 2 ** (attempt - 1), WS_BACKOFF_MAX_S)
+                    logger.warning(
+                        "deepgram ws down (%s); reconnect %d/%d in %.1fs, "
+                        "%.2fs buffered, %.2fs to replay",
+                        e,
+                        attempt,
+                        WS_MAX_RETRIES,
+                        delay,
+                        buffer_seconds(pending),
+                        buffer_seconds(replay),
+                    )
+                    await asyncio.sleep(delay)
+        finally:
+            self.connected = False
+            collector.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await collector

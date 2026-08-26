@@ -595,3 +595,83 @@ Consecuencias practicas:
 
 Mitigacion inmediata: `make matrix-test ONLY=<idioma>` corre solo una fuente (4 pares) y
 cuesta una quinta parte. Para cerrar F5 basta con volver a medir las fuentes afectadas.
+
+## 2026-08-26 - F6
+
+### D31. El corte de red se simula en el WebSocket, no en la red del sistema
+
+`make soak` no toca iptables ni desconecta la interfaz. `simulate_network_drop(segundos)`
+cierra el socket de Deepgram y bloquea la reconexion durante ese tiempo, que es
+exactamente lo que el motor observa cuando la red cae. Tres razones:
+
+1. **No necesita root.** Un test que exige privilegios no se corre.
+2. **Es reproducible.** El corte cae en el segundo exacto que se pide, siempre.
+3. **Apunta al riesgo correcto.** R5 es "caida del WebSocket de Deepgram en sesion larga",
+   no "caida de toda la red". Cortar la interfaz mataria ademas Groq y Fish, y mezclaria
+   tres fallos en una sola medida.
+
+Limitacion aceptada: no ejercita la reconexion de TCP ni de DNS. Un corte real de
+interfaz podria comportarse distinto en esos niveles.
+
+### D32. Reconexion: buffer acotado mas ventana de reenvio
+
+El criterio pide recuperarse "sin perder segmentos", y para eso no basta con reconectar.
+Tres piezas en `DeepgramStreamTranscriber.stream`:
+
+- **Colector siempre activo.** Consume `frames` tambien mientras el socket esta caido. Si
+  se parase, el microfono se atascaria y se perderia audio en origen.
+- **Buffer acotado a 30 s.** Guarda lo capturado durante el corte. Si el corte se alarga,
+  descarta lo mas viejo y lo cuenta en `frames_dropped_overflow`: en tiempo real el audio
+  viejo ya no sirve para doblar, y crecer sin limite acabaria en OOM en una sesion larga.
+- **Ventana de reenvio de 10 s.** Guarda el audio posterior al ultimo `is_final` recibido.
+  Deepgram no confirma que proceso, asi que el segmento a medias se perderia al caer el
+  socket. Al reconectar se reinyecta esa ventana antes que el audio nuevo, y se vacia en
+  cuanto llega un `is_final`.
+
+**Continuidad de la linea temporal.** Deepgram reinicia sus timestamps de palabra en cada
+socket nuevo. Sin corregirlo, tras reconectar los tiempos volverian a cero y el TTFA
+saldria absurdo. Se lleva `_sent_total` acumulado entre conexiones y `_conn_offset` con el
+valor al abrir cada una; los timestamps de palabra se desplazan por ese offset.
+
+### D33. Degradacion del TTS a subtitulo
+
+`engine._process` captura `SynthesisError` y sigue. El turno queda con `audio_duration=0`,
+se marca `tts_failed`, y `live.py` lo imprime como `[SUBTITULO: TTS caido]` con la
+traduccion en pantalla.
+
+Dos detalles que importan:
+
+- El turno degradado **no alimenta la calibracion de duracion** del `DriftController`: un
+  audio de cero segundos falsearia el ratio y arrastraria el `speed` de los turnos
+  siguientes.
+- Un fallo de **traduccion** es distinto: sin texto no hay subtitulo que ensenar. El bucle
+  de salida lo registra y continua con el turno siguiente, sin tumbar la sesion.
+
+### D34. `--offline-llm`: prueba de resistencia sin cuota de Groq
+
+La cuota diaria (D30) se agoto otra vez a mitad de F6. `make soak ARGS=--offline-llm`
+sustituye M5 por el `FakeTranslator` determinista y deja el resto del pipeline intacto:
+mismo VAD, mismo WebSocket con su reconexion, mismos triggers, mismo TTS real.
+
+Mide lo que el criterio de F6 pide de verdad —**estabilidad durante 20 minutos sin
+intervencion y recuperacion automatica del corte**— sin gastar tokens. **No mide calidad
+de traduccion**, que se verifica aparte con el traductor real en una corrida corta.
+
+Efecto secundario util: el `FakeTranslator` invierte el texto, y Fish lo pronuncia mas
+despacio que a una frase real, asi que la deriva se va **positiva**. Es la primera vez que
+se ejercita esa direccion del `DriftController`; el test de F4 solo produjo deriva
+negativa y dejo `should_drop` sin disparar (D24).
+
+### D35. El TTFA puede salir ligeramente negativo con el traductor falso
+
+En el soak con `--offline-llm` aparecen valores como `ttfa_ms: -84`.
+
+No es un error de signo ni un turno que suene antes de hablarse. `t_speech_end` sale del
+timestamp de la ultima palabra que da Deepgram, traducido a tiempo de captura; el margen
+de ese mapeo es de algunas decenas de milisegundos. Con el traductor real, el LLM anade
+unos 700 ms y el margen queda enterrado. Con el traductor falso la cascada es casi
+instantanea y el error de mapeo aflora con signo negativo.
+
+Es el limite de resolucion de la medida, y conviene tenerlo presente al leer percentiles
+de TTFA muy bajos. No se corrige con un `max(0, ...)`: eso ocultaria el margen en vez de
+mostrarlo.

@@ -21,6 +21,8 @@ microfono -> VAD -> STT -> segmentacion -> traduccion -> TTS clonado -> altavoz
 
 Idiomas: **es, en, pt-BR, fr, ja**. Declarados por variable de entorno, sin autodeteccion.
 
+> **Demo:** el guion de 3 minutos para ensenarlo esta en [`docs/demo.md`](docs/demo.md).
+>
 > **Estado del proyecto:** lee [`STATE.md`](STATE.md). Varias fases estan cerradas con
 > salvedades explicitas y algun criterio sin verificar. [`DECISIONS.md`](DECISIONS.md)
 > registra los 30 desvios del plan con su motivo.
@@ -249,6 +251,14 @@ make live ARGS="--from-wav tests/fixtures/es_30s.wav"   # sin microfono, para pr
 make live ARGS=--devices                 # lista los dispositivos de audio
 ```
 
+### Sesion larga sin supervision
+
+```bash
+make soak MIN=20 CUT_AT=10                     # 20 min, corte de red simulado al minuto 10
+make soak MIN=20 ARGS=--offline-llm            # sin gastar cuota de Groq: mide estabilidad,
+                                               # no calidad de traduccion
+```
+
 > La primera ejecucion descarga los pesos del turn-detector (unos cientos de MB) desde
 > HuggingFace. Solo la primera vez.
 
@@ -289,6 +299,7 @@ make enroll-delete ID=<reference_id>
 | `make enroll-delete ID=x` | `python -m sincro.enroll --delete x` | Borra la huella de Fish |
 | `make drift-test` | `python -m sincro.dub_file --in tests/fixtures/es_10min.wav --curve` | Deriva sobre 10 min |
 | `make matrix-test` | `python -m sincro.matrix` | Los 20 pares dirigidos |
+| `make soak MIN=20` | `python -m sincro.soak --minutes 20` | Sesion larga con corte de red simulado |
 | `make report` | `python -m sincro.report` | Agrega el JSONL |
 | `make lint` | `ruff check src/` y `mypy` | Estilo y tipos |
 | `make clean` | — | Borra `out/` y caches |

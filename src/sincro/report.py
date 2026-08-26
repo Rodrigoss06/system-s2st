@@ -13,6 +13,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from .drift import DriftSample, render_curve
+
 TARGET_DISTRIBUTION = {
     "eou": (0.55, 0.70),
     "punctuation": (0.20, 0.35),
@@ -97,6 +99,10 @@ def render(path: Path, rows: list[dict[str, Any]]) -> str:
     a(f"  speed  min/max  {min(speeds):.3f} / {max(speeds):.3f}")
     a(f"  bytes  in/out   {bin_} / {bout}"
       + (f"   ratio {bout / bin_:.3f}" if bin_ else ""))
+    a("")
+    a("  curva de deriva (s)")
+    a(render_curve([DriftSample(int(r["seg_id"]), float(r["drift_s"]), float(r["speed_applied"]),
+                                False, False) for r in rows]))
     a("")
     a("Coste")
     a(f"  tokens in/out   {tin} / {tout}")

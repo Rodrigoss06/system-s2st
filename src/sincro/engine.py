@@ -27,7 +27,7 @@ from .config import Settings, uses_byte_budget
 from .contracts import DubbedChunk, Segment
 from .drift import DriftController
 from .gate import UNMUTE_GUARD_S, SileroGate
-from .synthesizer import FishSynthesizer
+from .synthesizer import FishSynthesizer, SynthesisError
 from .telemetry import SegmentRecord, TelemetryWriter, llm_cost_usd, tts_cost_usd
 from .transcriber import DeepgramStreamTranscriber
 from .translator import GroqTranslator
@@ -42,6 +42,7 @@ class TurnResult:
     ttfa_ms: int
     audio_duration: float
     dropped: bool = False
+    tts_failed: bool = False
 
 
 @dataclass
@@ -49,6 +50,7 @@ class EngineStats:
     turns: int = 0
     skipped: int = 0
     dropped: int = 0
+    tts_failures: int = 0
     leaked: int = 0
     ttfa_ms: list[int] = field(default_factory=list)
     triggers: dict[str, int] = field(default_factory=dict)
@@ -158,6 +160,7 @@ class DubbingEngine:
             self.gate.mute()
         audio_duration = 0.0
         first = True
+        tts_failed = False
         t_audio_out = time.monotonic()
         try:
             async for chunk in self._synth_or_skip(tr, speed, dropped):
@@ -168,6 +171,14 @@ class DubbingEngine:
                 audio_duration += chunk.audio_duration
                 if self.on_audio is not None:
                     await self.on_audio(chunk)
+        except SynthesisError as exc:
+            # Degradacion: el TTS cae, el motor sigue. La traduccion ya existe y vale como
+            # subtitulo; tirar la sesion entera por un fallo de un proveedor seria peor
+            # que quedarse sin voz durante un turno.
+            tts_failed = True
+            self.stats.tts_failures += 1
+            logger.warning("seg %d: TTS failed, degrading to subtitle: %s", seg.seg_id, exc)
+            audio_duration = 0.0
         finally:
             if first:
                 # Sin audio: [[SKIP]] o texto vacio. Se marca igual para no dejar la
@@ -180,7 +191,7 @@ class DubbingEngine:
                 self._pending_tasks.add(task)
                 task.add_done_callback(self._pending_tasks.discard)
 
-        if not dropped:
+        if not dropped and not tts_failed:
             self.drift_ctl.observe(seg, audio_duration, speed)
         self.drift_ctl.update(seg, audio_duration, speed, dropped)
         rec.source_duration_s = round(seg.source_duration, 3)
@@ -213,6 +224,7 @@ class DubbingEngine:
             ttfa_ms=rec.ttfa_ms,
             audio_duration=audio_duration,
             dropped=dropped,
+            tts_failed=tts_failed,
         )
 
     async def _synth_or_skip(
@@ -259,6 +271,10 @@ class DubbingEngine:
         return self.stats
 
     async def aclose(self) -> None:
+        # Los unmute pendientes se esperan antes de cerrar. Sin esto el ultimo turno deja
+        # un mute sin su unmute y el resumen de sesion parece un fallo del anti-eco.
+        if self._pending_tasks:
+            await asyncio.gather(*self._pending_tasks, return_exceptions=True)
         await self.synth.aclose()
         self.writer.close()
 

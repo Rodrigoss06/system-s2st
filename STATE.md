@@ -1,7 +1,7 @@
 # STATE - SINCRO Engine v3
 
 Ultima actualizacion: 2026-08-26
-Fase activa: F5
+Fase activa: F6
 
 ## Fases
 
@@ -12,8 +12,8 @@ Fase activa: F5
 | F2 Streaming en vivo | HECHO (*) | TTFA P90 menor a 2.0 s en 20 turnos | Pipeline completo y funcionando extremo a extremo. **Criterio NO certificado**: exige voz real por microfono, 20 turnos, 5 min. Sobre el banco `--from-wav`: TTFA P90 3301-4783 ms segun ajuste. **(*) Cerrada por decision del usuario el 2026-08-26 SIN la medida por microfono (D18).** Ver bloque de evidencia F2 |
 | F3 Clonacion | HECHO (*) | 3 de 3 identifican el timbre | Mecanismo completo y verificado: enrolamiento HTTP 201 `state=trained`, contraste A/B medido (dF0 5.7 Hz clonada vs 63.3 Hz neutra). **(*) Cerrada por decision del usuario el 2026-08-26; el panel de 3 personas sigue pendiente**, material listo en `out/ab/`. Ver bloque de evidencia F3 |
 | F4 Isocronia y deriva | HECHO (*) | deriva menor a 300 ms por 10 min | **NO CUMPLE** con la lectura literal: -82.61 s sobre 10 min. Es aritmetica, no un bug: el minimo posible con el piso de speed en 0.95 es -73.5 s (D23). **Atraso maximo +0.00 s**: el doblaje nunca va por detras. `speed` en rango en el 100 % de los segmentos. **(*) Cerrada por decision del usuario el 2026-08-26 con el criterio literal sin cumplir (R10).** Ver bloque de evidencia F4 |
-| F5 Cinco idiomas | EN CURSO | 20 pares inteligibles | Los 20 pares producen audio inteligible: RT confianza 0.997-1.000 en todos. 12 factores recalibrados y aplicados. **R1 sin concluir**: dos bugs de japones corregidos (D28, D29) no se pudieron remedir, cuota diaria de Groq agotada (D30). Ver bloque de evidencia F5 |
-| F6 Endurecimiento | PENDIENTE | 20 min sin intervencion | - |
+| F5 Cinco idiomas | HECHO (*) | 20 pares inteligibles | Los 20 pares producen audio inteligible: RT confianza 0.997-1.000 en todos. 12 factores recalibrados y aplicados. **R1 sin concluir**: dos bugs de japones corregidos (D28, D29) no se pudieron remedir, cuota diaria de Groq agotada (D30). **(*) Cerrada por decision del usuario el 2026-08-26 con R1 sin concluir.** Ver bloque de evidencia F5 |
+| F6 Endurecimiento | HECHO | 20 min sin intervencion | `make soak`: 20.0 min, 195 turnos, ids 1..195 **sin huecos**, 1 reconexion, 4.9 s sin socket, 226 frames reenviados, 0 perdidos. Los 4 puntos del criterio en SI. Ver bloque de evidencia F6 |
 
 ## Modulos
 
@@ -793,7 +793,174 @@ hasta remedir**. No se asume ni roto ni funcional.
 3. Panel humano de inteligibilidad: el round-trip STT prueba que el audio es reconocible,
    no que suene natural.
 
+## Evidencia F6 - HECHO
+
+### Entregado
+
+```
+src/sincro/transcriber.py   reconexion con backoff, buffer de 30 s y ventana de reenvio
+src/sincro/engine.py        degradacion a subtitulo si cae el TTS
+src/sincro/soak.py          make soak: sesion larga con corte de red inyectado
+src/sincro/report.py        curva de deriva ASCII en la tabla final
+docs/demo.md                guion de demo por consola de 3 min
+```
+
+### `make soak MIN=20 CUT_AT=10` - criterio de aceptacion
+
+```
+  duracion real   : 20.0 min
+  turnos          : 195
+  TTFA            : P50 7998 ms   P90 16843 ms   P99 21553 ms
+  triggers        : {'eou': 102, 'timeout': 62, 'punctuation': 31}
+  deriva          : final +23.11s   max atraso +33.05s
+  reconexiones    : 1   sin socket 4.9s   frames reenviados 226
+  buffer          : 0 frames descartados por desbordamiento
+  TTS degradado   : 0 turnos a subtitulo
+  gate            : mute_calls 196, unmute_calls 195
+
+  CRITERIO F6
+    sesion completa sin intervencion : SI
+    la sesion no se cayo             : SI
+    corte de red recuperado solo     : SI (1 reconexiones)
+    turnos despues del corte         : SI
+```
+
+**Sin perder segmentos.** 195 segmentos con ids 1..195 y **ningun hueco en la numeracion**.
+El corte midio 4.9 s contra los 5 s pedidos.
+
+Recuperacion visible en los datos, con el TTFA decayendo mientras se procesa el reenvio:
+
+```
+seg 100  t=584.5s  timeout      ttfa=  8702     <- ultimo antes del corte
+>>> [10.0m] CORTE DE RED SIMULADO, 5s <<<
+seg 101  t=592.6s  eou          ttfa= 15749     <- primero despues, con el buffer encima
+seg 102  t=597.9s  punctuation  ttfa= 13582
+seg 103  t=604.7s  eou          ttfa= 12266
+seg 104  t=610.3s  eou          ttfa= 10804     <- vuelve a la normalidad
+```
+
+### Degradacion del TTS, verificada aparte
+
+Con un sintetizador que lanza `SynthesisError` en cada turno:
+
+```
+  turno 1 [SUBTITULO: TTS caido]
+     Good morning everyone, and thank you for joining this morning's meeting.
+
+  la sesion se cayo?      : NO
+  turnos producidos       : 1
+  degradados a subtitulo  : 1
+  puerta anti-eco         : mute=1 unmute=1
+```
+
+La traduccion sale por pantalla y la sesion continua. El turno degradado no alimenta la
+calibracion de duracion del controlador de deriva: un audio de cero segundos falsearia el
+ratio de los turnos siguientes.
+
+### `make report` - tabla final con curva de deriva
+
+```
+195 segmentos   es -> en
+
+TTFA
+  P50      7998 ms      P90     16843 ms      P99     21553 ms
+
+Triggers
+  !! eou          102   52.3%   objetivo 55%-70%
+  !! punctuation   31   15.9%   objetivo 20%-35%
+  !! timeout       62   31.8%   objetivo 0%-10%
+  ok max_len        0    0.0%   objetivo 0%-3%
+
+Isocronia y deriva
+  audio fuente      891.82 s      audio doblado     957.95 s
+  deriva final      +23.11 s      deriva max        +33.05 s
+  speed  min/max  1.000 / 1.250
+
+  curva de deriva (s)
+  +33.05|                                #
+  +24.41|                        #########
+  +15.78|              ###################                     ##########
+  +7.14|     ############################     ###     ##################
+    0 |################################################################
+       ----------------------------------------------------------------
+       segmento 1 .. 195
+```
+
+### Dos ramas del controlador de deriva ejercitadas por primera vez
+
+D24 dejo anotado que `make drift-test` no llegaba a probarlas, porque en F4 la deriva era
+negativa toda la sesion. Aqui si:
+
+- **Rama de aceleracion.** `speed` alcanza el techo duro de 1.25 en **186 de 195**
+  segmentos, y se queda en rango en **195/195**. Es la respuesta correcta a una deriva de
+  +33 s.
+- **`RESET_SILENCE`.** Dispara dos veces, y **la primera coincide con el corte de red**:
+
+  ```
+  seg 100 -> 101:  +31.82s -> +1.73s   (recupera 30.09s)  <- a los 9.9 min, el corte
+  seg 124 -> 125:  +11.20s ->  +0.66s   (recupera 10.54s)
+  ```
+
+  El silencio del corte supera los 1.5 s de `RESET_SILENCE` y borra la deuda acumulada.
+  Es el mecanismo funcionando tal como el documento lo describe.
+
+`should_drop` **sigue sin dispararse**, pese a 190 segmentos por encima del umbral duro:
+exige ademas `trigger == 'timeout'` y menos de 25 caracteres, y el fixture nunca produce
+segmentos cortos de relleno. Esa rama solo se ejercitara con habla conversacional real.
+
+### Salvedades de esta medida
+
+**El traductor es falso.** La cuota diaria de Groq se agoto a mitad de F6 (D30), asi que
+los 20 minutos corrieron con `--offline-llm` (D34): VAD, WebSocket con su reconexion,
+triggers, deriva y TTS son todos reales; **M5 no**. Consecuencias al leer los numeros:
+
+- **TTFA no es interpretable.** El P90 de 16.8 s refleja el atasco por deriva positiva,
+  no la latencia del pipeline real. El `min -911 ms` es el margen del mapeo de tiempos
+  aflorando cuando la cascada es casi instantanea (D35).
+- **La deriva positiva es artificial.** `FakeTranslator` invierte el texto y Fish lo
+  pronuncia mas despacio que una frase real. Util para ejercitar el controlador, inutil
+  para juzgar isocronia.
+- **La distribucion de triggers no es representativa**, ni el coste: los tokens salen de
+  las estimaciones del fake, no de Groq.
+
+Lo que **si** mide esta corrida, que es lo que el criterio de F6 pide: 20 minutos sin
+intervencion, sin caida, con recuperacion automatica del corte y sin perder segmentos.
+
+**Un desajuste menor:** `mute_calls 196` contra `unmute_calls 195`. El ultimo turno
+quedaba reproduciendo cuando la sesion cerro y su `unmute` diferido se cancelo. Corregido:
+`engine.aclose()` espera ahora las tareas pendientes antes de cerrar.
+
+### `docs/demo.md`
+
+Guion de 3 minutos en cuatro bloques, en el orden pedido: traduccion funcionando,
+contraste de voz clonada contra neutra, frase con numeros y fechas exactos, y tabla de
+metricas. Incluye checklist previo, plan B si se cae la red, y una seccion de **lo que no
+hay que prometer** con los criterios que siguen sin cumplirse.
+
 ## Registro de sesiones
+
+### 2026-08-26 - F6 cerrada
+
+Reconexion del WebSocket con backoff, buffer de 30 s y ventana de reenvio de 10 s;
+degradacion a subtitulo si cae el TTS; `make soak` con corte de red inyectado; curva de
+deriva en `make report`; y `docs/demo.md`.
+
+**Criterio cumplido:** 20.0 min sin intervencion, 195 segmentos sin huecos en la
+numeracion, 1 reconexion automatica tras un corte de 4.9 s, 226 frames reenviados y 0
+perdidos por desbordamiento.
+
+Salvedad importante: los 20 minutos corrieron con `--offline-llm` porque la cuota de Groq
+se agoto (D34). Todo el pipeline es real salvo M5. El TTFA y la deriva de esa corrida no
+son interpretables; lo que mide es estabilidad y recuperacion, que es el criterio.
+
+Efecto util: la deriva positiva ejercito por primera vez la rama de aceleracion del
+controlador (speed en el techo de 1.25 en 186/195) y `RESET_SILENCE`, que disparo
+justo en el corte de red y recupero 30.09 s de deuda. `should_drop` sigue sin probarse.
+
+F5 se cierra por decision del usuario con R1 sin concluir.
+
+Cinco desvios: D31 (corte simulado en el socket), D32 (buffer y ventana de reenvio),
+D33 (degradacion a subtitulo), D34 (`--offline-llm`) y D35 (TTFA negativo).
 
 ### 2026-08-26 - F5 en curso, R1 sin concluir
 

@@ -34,7 +34,7 @@ help:
 	@echo "  make enroll-delete ID=x        Borra una huella vocal de Fish"
 	@echo "  make drift-test            F4  WAV de 10 min, mide deriva acumulada (DRIFT_WAV=)"
 	@echo "  make matrix-test           F5  Los 20 pares dirigidos"
-	@echo "  make soak MIN=20           F6  Sesion larga con corte de red simulado"
+	@echo "  make soak MIN=20           F6  Sesion larga con corte de red (CUT_AT=, WAV=)"
 	@echo "  make report                    Agrega el JSONL: P50 P90 P99, triggers, deriva, coste"
 	@echo ""
 	@echo "  make lint                  ruff + mypy strict"
@@ -90,7 +90,8 @@ matrix-test:
 	$(PY) -m sincro.matrix $(if $(ONLY),--only $(ONLY),) $(ARGS)
 
 soak:
-	$(call NOT_IMPLEMENTED,soak,F6 Endurecimiento)
+	$(REQUIRE_VENV)
+	$(PY) -m sincro.soak --minutes $(if $(MIN),$(MIN),20) $(if $(WAV),--wav "$(WAV)",) $(if $(CUT_AT),--cut-at $(CUT_AT),) $(ARGS)
 
 report:
 	$(REQUIRE_VENV)
