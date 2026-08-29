@@ -44,6 +44,7 @@ setup:
 	@command -v uv >/dev/null || { echo "ERROR: uv no esta instalado. https://docs.astral.sh/uv/"; exit 1; }
 	uv venv --python $(PY_VERSION) $(VENV)
 	uv pip install --python $(PY) -e ".[dev]"
+	$(PY) -m livekit.agents download-files
 	@echo ""
 	@echo "Listo. Copia .env.example a .env y rellena las 3 credenciales."
 

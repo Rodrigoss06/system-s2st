@@ -259,8 +259,19 @@ make soak MIN=20 ARGS=--offline-llm            # sin gastar cuota de Groq: mide 
                                                # no calidad de traduccion
 ```
 
-> La primera ejecucion descarga los pesos del turn-detector (unos cientos de MB) desde
-> HuggingFace. Solo la primera vez.
+> Antes del primer `make live` (o `make soak`) hay que descargar los pesos del
+> turn-detector y del VAD (unos cientos de MB) desde HuggingFace. El plugin los carga con
+> `local_files_only=True`, asi que no se descargan solos en la primera corrida:
+>
+> ```bash
+> # Linux / macOS
+> .venv/bin/python -m livekit.agents download-files
+>
+> # Windows
+> .venv\Scripts\python.exe -m livekit.agents download-files
+> ```
+>
+> Solo hace falta una vez por maquina.
 
 ### Clonar tu voz
 

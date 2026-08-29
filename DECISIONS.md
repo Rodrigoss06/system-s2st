@@ -767,3 +767,86 @@ Descomposicion aproximada: ~300 ms de endpointing + ~200 ms de procesado + ~180 
 **El gate de VAD no tiene la culpa.** Se sospecho que recortar el silencio dejaba a
 Deepgram sin material para endpointar. Medido: 1009 ms con gate contra 1023 ms sin el.
 Sin diferencia; el hangover de 160 ms le basta.
+
+## 2026-08-29 - Inicializacion del entorno de desarrollo
+
+### D40. `pip-system-certs` anadido a las dependencias, solo Windows
+
+`make check` fallaba en un entorno Windows con las 3 credenciales `unreachable:
+ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get
+local issuer certificate`, mientras `curl` a los mismos hosts funcionaba. Diagnosticado
+con `openssl s_client`: el certificado que llega al proceso Python esta emitido por
+`Avast Web/Mail Shield Root`, la CA que Avast Antivirus inyecta para inspeccionar TLS.
+Windows confia en esa CA (por eso `curl` y el navegador no fallan); el bundle de
+`certifi` que usan `httpx`/`livekit` no la incluye y nunca la incluira, porque es local a
+esta maquina.
+
+No es un problema del proyecto ni de una API: es un antivirus haciendo TLS interception
+en la maquina de desarrollo. `pip-system-certs` reemplaza la verificacion basada en
+`certifi` por el almacen de certificados del sistema operativo (Windows Certificate
+Store), donde la CA de Avast ya esta confiada. Se instala solo como `.pth` hook al
+importar `ssl`, sin tocar codigo del proyecto.
+
+Acotado a `sys_platform == 'win32'`: en Linux/macOS, donde corre CI y donde no hay este
+antivirus, `certifi` sigue siendo la fuente de confianza.
+
+Verificado:
+
+```
+antes: httpx.get('https://api.deepgram.com') -> SSL: CERTIFICATE_VERIFY_FAILED
+despues (con pip-system-certs instalado): httpx.get(...) -> 404  (TLS ok, ruta no existe)
+make check -> 3/3 credenciales validas
+```
+
+### D41. `deepgram-sdk` faltaba en `pyproject.toml`: `make live` habria fallado en runtime
+
+D13 exige que `transcriber.py` use el SDK oficial de Deepgram (`from deepgram import
+AsyncDeepgramClient`) para el streaming de F2, no el plugin de LiveKit. La evidencia de
+F2 y F6 en `STATE.md` da por corrido ese camino, pero `pyproject.toml` solo declaraba
+`livekit-plugins-deepgram`: el paquete `deepgram-sdk` nunca se anadio a las dependencias
+del proyecto.
+
+`mypy --strict` lo delato al inicializar el entorno desde cero:
+
+```
+src\sincro\transcriber.py:299: error: Cannot find implementation or library stub for
+module named "deepgram"  [import-not-found]
+```
+
+En cualquier `.venv` nuevo instalado solo desde `pyproject.toml`, `make live` habria
+fallado con `ModuleNotFoundError: No module named 'deepgram'` en el primer turno de
+streaming. No se detecto antes porque los `.venv` usados en F2-F6 ya tenian el paquete
+instalado a mano, sin registrarlo en el manifiesto.
+
+Anadido `deepgram-sdk>=7.0` a las dependencias. Verificado: `mypy` vuelve a pasar sin
+errores sobre los mismos archivos.
+
+### D42. `make live` exige descargar los pesos del turn-detector a mano antes del primer uso
+
+El README decia "la primera ejecucion descarga los pesos... sola". Es falso: el plugin
+`livekit-plugins-turn-detector` carga el modelo ONNX con `local_files_only=True`
+(`base.py`, `initialize()`), asi que si los pesos no estan ya en la cache de HuggingFace,
+`gate.py:load_eou()` revienta con `RuntimeError: ... Could not find file
+"model_q8.onnx"` en el primer `make live` de una maquina nueva. No es un bug del
+proyecto: es el comportamiento del plugin de terceros, mal documentado en el README.
+
+Corregido de dos formas:
+
+1. `Makefile`: `setup` ahora corre `$(PY) -m livekit.agents download-files` despues de
+   instalar dependencias, asi que una instalacion nueva vía `make setup` ya lo resuelve.
+2. `README.md`, seccion de `make live`: la nota pasa de "se descarga sola" a el comando
+   explicito, para quien instalo con la Opcion B (sin `make`) o con un `.venv` mas viejo
+   que el cambio al Makefile.
+
+Verificado en Windows, entorno recien inicializado:
+
+```
+$ python -m livekit.agents download-files
+descarga deepgram, fishaudio, openai, silero, turn_detector (v1.2.2-en y v0.4.1-intl)
+finished downloading files for livekit.plugins.turn_detector
+
+$ python -m sincro.live
+  Llevas auriculares puestos? [s/N] s
+  cargando turn-detector (local, primera vez tarda)...
+  <ya no revienta, sigue a abrir el microfono>
+```
