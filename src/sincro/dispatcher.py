@@ -80,6 +80,10 @@ def create_app(fish_api_key: str, db_path: str = "out/voices.db") -> FastAPI:
     repo = VoiceRepository(registry, db_path=db_path)
     sessions: dict[str, dict[str, object]] = {}
 
+    @app.get("/health")
+    async def health() -> dict[str, str]:
+        return {"status": "ok"}
+
     @app.post("/v1/sessions", status_code=201, response_model=SessionsOut)
     async def create_session(body: SessionsIn) -> SessionsOut:
         session_id = f"s_{uuid.uuid4().hex[:12]}"
@@ -168,3 +172,26 @@ def create_app(fish_api_key: str, db_path: str = "out/voices.db") -> FastAPI:
     app.state.repo = repo
     app.state.sessions = sessions
     return app
+
+
+if __name__ == "__main__":
+    import argparse
+    import os
+    import sys
+
+    import uvicorn
+
+    from .config import load_settings
+
+    ap = argparse.ArgumentParser(
+        prog="dispatcher", description="Dispatcher HTTP (contrato de conexion, seccion 4)"
+    )
+    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--port", type=int, default=8000)
+    args = ap.parse_args()
+
+    s = load_settings()
+    db_path = os.getenv("SINCRO_VOICES_DB", "out/voices.db")
+    app = create_app(s.fish_api_key, db_path=db_path)
+    print(f"Dispatcher listening on http://{args.host}:{args.port}")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")

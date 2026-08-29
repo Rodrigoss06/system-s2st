@@ -309,3 +309,31 @@ async def run_call_server(
     return await serve(
         lobby.handle, host, port, compression=None, process_request=_make_process_request(ready)
     )
+
+
+if __name__ == "__main__":
+    import argparse
+    import asyncio
+    import sys
+
+    from .config import load_settings
+
+    ap = argparse.ArgumentParser(
+        prog="call_serve", description="Worker: empareja dos WebSocket en un CallSession"
+    )
+    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--port", type=int, default=8080)
+    args = ap.parse_args()
+
+    async def _main() -> int:
+        s = load_settings()
+        writer = TelemetryWriter()
+        server = await run_call_server(args.host, args.port, s, writer)
+        print(f"Worker listening on ws://{args.host}:{args.port}  telemetry={writer.path}")
+        async with server:
+            await server.serve_forever()
+
+    try:
+        asyncio.run(_main())
+    except KeyboardInterrupt:
+        sys.exit(0)

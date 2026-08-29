@@ -1,0 +1,86 @@
+# SINCRO Engine v4 - CI/CD para Azure Container Apps
+#
+# Flujo:
+#   1. Push a main → construye las dos imagenes Docker
+#   2. Las publica en Azure Container Registry (ACR)
+#   3. Actualiza las Azure Container Apps con la nueva imagen
+#
+# Las Container Apps se crean UNA vez con scripts/azure-infra.sh.
+# Este workflow solo actualiza la imagen en cada push.
+
+name: Build and Deploy to Azure
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+      - "prompts/**"
+      - "scripts/**"
+  workflow_dispatch:
+
+env:
+  ACR_LOGIN_SERVER: ${{ vars.AZURE_ACR_NAME }}.azurecr.io
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uv pip install --system -e ".[dev]"
+      - run: ruff check src/
+      - run: mypy
+
+  build-and-deploy:
+    needs: lint
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - dockerfile: Dockerfile
+            image-name: sincro-worker
+            app-name: ${{ vars.AZURE_WORKER_APP }}
+            port: "8080"
+          - dockerfile: Dockerfile.dispatcher
+            image-name: sincro-dispatcher
+            app-name: ${{ vars.AZURE_DISPATCHER_APP }}
+            port: "8000"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Login to Azure Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.AZURE_CLIENT_ID }}
+          password: ${{ secrets.AZURE_CLIENT_SECRET }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.target.dockerfile }}
+          push: true
+          tags: |
+            ${{ env.ACR_LOGIN_SERVER }}/${{ matrix.target.image-name }}:${{ github.sha }}
+            ${{ env.ACR_LOGIN_SERVER }}/${{ matrix.target.image-name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy to Azure Container Apps
+        uses: azure/container-apps-deploy-action@v2
+        with:
+          resourceGroup: ${{ vars.AZURE_RESOURCE_GROUP }}
+          containerAppName: ${{ matrix.target.app-name }}
+          imageToDeploy: ${{ env.ACR_LOGIN_SERVER }}/${{ matrix.target.image-name }}:${{ github.sha }}
+          targetPort: ${{ matrix.target.port }}

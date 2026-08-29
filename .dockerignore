@@ -1,0 +1,39 @@
+# Python
+__pycache__
+*.pyc
+*.pyo
+.mypy_cache
+.ruff_cache
+*.egg-info
+.venv
+venv
+
+# Git
+.git
+.gitignore
+
+# Tests y fixtures (no van a produccion)
+tests/
+out/
+
+# Docs
+docs/
+prompts/
+*.md
+
+# Entorno local
+.env
+.env.local
+
+# IDE
+.vscode
+.idea
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+Dockerfile*
+docker-compose.yml
+.dockerignore
