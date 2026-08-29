@@ -177,7 +177,6 @@ def create_app(fish_api_key: str, db_path: str = "out/voices.db") -> FastAPI:
 if __name__ == "__main__":
     import argparse
     import os
-    import sys
 
     import uvicorn
 
