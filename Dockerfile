@@ -37,7 +37,8 @@ COPY src/sincro/__init__.py src/sincro/__init__.py
 # Instalar dependencias en un venv del sistema
 RUN uv venv /opt/venv && \
     uv pip install --python /opt/venv/bin/python -e ".[dev]" && \
-    # Bajar modelos ONNX del turn-detector (Silero VAD + EOU)
+    # Bajar modelos ONNX del turn-detector (Silero VAD + EOU).
+    # huggingface_hub guarda en ~/.cache/huggingface/ por defecto.
     /opt/venv/bin/python -m livekit.agents download-files
 
 # ---- capa final ----
@@ -45,8 +46,11 @@ FROM base AS final
 
 WORKDIR /app
 
-# Copiar el venv completo con dependencias y modelos
+# Copiar el venv completo con dependencias
 COPY --from=builder /opt/venv /opt/venv
+
+# Copiar modelos ONNX descargados (huggingface cache)
+COPY --from=builder /root/.cache/huggingface /root/.cache/huggingface
 
 # Copiar el codigo fuente
 COPY src/ src/
@@ -56,10 +60,6 @@ COPY pyproject.toml .
 # uv venv no incluye pip; usamos uv pip install directamente
 COPY --from=builder /usr/local/bin/uv /usr/local/bin/uv
 RUN uv pip install --python /opt/venv/bin/python -e ".[dev]" --no-deps
-
-# El turn-detector descarga sus modelos a ~/.local/share/livekit/agents/
-# por defecto. Los copiamos desde el builder.
-COPY --from=builder /root/.local/share /root/.local/share
 
 ENV PATH="/opt/venv/bin:$PATH"
 ENV PYTHONUNBUFFERED=1
