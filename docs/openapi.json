@@ -1,0 +1,383 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "SINCRO Dispatcher",
+    "description": "Contrato de conexion v1 -- crea llamadas y enrola timbres. El WebSocket de audio y health/ready viven en el Worker, no aqui.",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/v1/sessions": {
+      "post": {
+        "summary": "Create Session",
+        "operationId": "create_session_v1_sessions_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionsIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionsOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sessions/{session_id}": {
+      "delete": {
+        "summary": "Delete Session",
+        "operationId": "delete_session_v1_sessions__session_id__delete",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/voices": {
+      "post": {
+        "summary": "Enroll Voice",
+        "operationId": "enroll_voice_v1_voices_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_enroll_voice_v1_voices_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VoiceOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/voices/{user_id}": {
+      "get": {
+        "summary": "Get Voices",
+        "operationId": "get_voices_v1_voices__user_id__get",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "User Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VoicesOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Body_enroll_voice_v1_voices_post": {
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          },
+          "lang": {
+            "type": "string",
+            "title": "Lang"
+          },
+          "audio": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "Audio"
+          },
+          "consent": {
+            "type": "boolean",
+            "title": "Consent",
+            "default": false
+          },
+          "consent_at": {
+            "type": "string",
+            "title": "Consent At",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "user_id",
+          "lang",
+          "audio"
+        ],
+        "title": "Body_enroll_voice_v1_voices_post"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "ParticipantIn": {
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          },
+          "lang": {
+            "type": "string",
+            "enum": [
+              "es",
+              "en",
+              "pt-BR",
+              "fr",
+              "ja"
+            ],
+            "title": "Lang"
+          },
+          "reference_id": {
+            "type": "string",
+            "title": "Reference Id",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "user_id",
+          "lang"
+        ],
+        "title": "ParticipantIn"
+      },
+      "SessionsIn": {
+        "properties": {
+          "participants": {
+            "items": {
+              "$ref": "#/components/schemas/ParticipantIn"
+            },
+            "type": "array",
+            "maxItems": 2,
+            "minItems": 2,
+            "title": "Participants"
+          }
+        },
+        "type": "object",
+        "required": [
+          "participants"
+        ],
+        "title": "SessionsIn"
+      },
+      "SessionsOut": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "ws_url": {
+            "type": "string",
+            "title": "Ws Url"
+          },
+          "tokens": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Tokens"
+          },
+          "expires_in": {
+            "type": "integer",
+            "title": "Expires In"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "ws_url",
+          "tokens",
+          "expires_in"
+        ],
+        "title": "SessionsOut"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "VoiceOut": {
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          },
+          "lang": {
+            "type": "string",
+            "enum": [
+              "es",
+              "en",
+              "pt-BR",
+              "fr",
+              "ja"
+            ],
+            "title": "Lang"
+          },
+          "reference_id": {
+            "type": "string",
+            "title": "Reference Id"
+          },
+          "consent_at": {
+            "type": "string",
+            "title": "Consent At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "user_id",
+          "lang",
+          "reference_id",
+          "consent_at"
+        ],
+        "title": "VoiceOut"
+      },
+      "VoicesOut": {
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          },
+          "voices": {
+            "items": {
+              "$ref": "#/components/schemas/VoiceOut"
+            },
+            "type": "array",
+            "title": "Voices"
+          }
+        },
+        "type": "object",
+        "required": [
+          "user_id",
+          "voices"
+        ],
+        "title": "VoicesOut"
+      }
+    }
+  }
+}
