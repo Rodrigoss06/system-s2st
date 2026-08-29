@@ -22,12 +22,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import queue
 import sys
 import threading
-import tkinter as tk
 from dataclasses import dataclass, field
-from tkinter import messagebox, scrolledtext
+from pathlib import Path
 from typing import Any
 
 from .adapters.console_io import MicrophoneSource, SpeakerSink, check_devices
@@ -42,6 +42,36 @@ from .telemetry import TelemetryWriter
 from .transcriber import DeepgramStreamTranscriber
 from .translator import GroqTranslator
 from .voices import FishVoiceRegistry
+
+
+def _fix_tcl_tk_library() -> None:
+    """Windows + Miniconda en el PATH: `tcl86t.dll`/`tk86t.dll` existen por duplicado
+    (uno correcto en la instalacion de Python, otro en `miniconda3\\Library\\bin`), y
+    Windows puede cargar el de Miniconda para este venv -- ese no encuentra su propio
+    `init.tcl` porque busca rutas que no coinciden con ninguna instalacion real
+    (`TclError: Can't find a usable init.tcl`).
+
+    Fija `TCL_LIBRARY`/`TK_LIBRARY` a la instalacion REAL de este interprete
+    (`sys.base_prefix`, no `sys.prefix`: en un venv apunta a la instalacion base, no a
+    `.venv`) antes de importar `tkinter`, que es cuando se resuelve la DLL. Solo actua
+    si faltan y si la carpeta existe -- en Linux/macOS, o si ya estan bien puestas, no
+    hace nada.
+    """
+    if os.name != "nt":
+        return
+    base = Path(sys.base_prefix) / "tcl"
+    tcl_dir = next(base.glob("tcl8.*"), None)
+    tk_dir = next(base.glob("tk8.*"), None)
+    if tcl_dir is not None and not os.environ.get("TCL_LIBRARY"):
+        os.environ["TCL_LIBRARY"] = str(tcl_dir)
+    if tk_dir is not None and not os.environ.get("TK_LIBRARY"):
+        os.environ["TK_LIBRARY"] = str(tk_dir)
+
+
+_fix_tcl_tk_library()
+
+import tkinter as tk  # noqa: E402 (tiene que ir despues de _fix_tcl_tk_library)
+from tkinter import messagebox, scrolledtext  # noqa: E402
 
 TTS_SAMPLE_RATE = 44_100
 
