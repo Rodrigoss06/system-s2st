@@ -21,7 +21,7 @@ define NOT_IMPLEMENTED
 	 exit 1
 endef
 
-.PHONY: help setup check dub-file live enroll enroll-delete drift-test matrix-test soak ws-test call-test api-test openapi report lint clean
+.PHONY: help setup check dub-file live live-app enroll enroll-delete drift-test matrix-test soak ws-test call-test api-test openapi report lint clean
 
 help:
 	@echo "SINCRO Engine v3 - targets"
@@ -30,6 +30,7 @@ help:
 	@echo "  make check                 F0  Valida las 3 credenciales y emite un JSONL con fakes"
 	@echo "  make dub-file IN=x.wav     F1  Cascada offline sobre archivo (OUT=... opcional)"
 	@echo "  make live                  F2  Microfono a altavoz (MIN_SILENCE=, SECONDS=, NEUTRAL=1)"
+	@echo "  make live-app                  Misma prueba en vivo, con ventana Tkinter en vez de consola"
 	@echo "  make enroll REF=voz.wav    F3  Registra timbre, devuelve reference_id"
 	@echo "  make enroll-delete ID=x        Borra una huella vocal de Fish"
 	@echo "  make drift-test            F4  WAV de 10 min, mide deriva acumulada (DRIFT_WAV=)"
@@ -67,6 +68,10 @@ dub-file:
 live:
 	$(REQUIRE_VENV)
 	$(PY) -m sincro.live $(if $(MIN_SILENCE),--min-silence $(MIN_SILENCE),) $(if $(SECONDS),--seconds $(SECONDS),) $(if $(NEUTRAL),--neutral-voice,) $(ARGS)
+
+live-app:
+	$(REQUIRE_VENV)
+	$(PY) -m sincro.live_app
 
 enroll:
 	$(REQUIRE_VENV)
