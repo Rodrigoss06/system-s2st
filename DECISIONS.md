@@ -1234,3 +1234,69 @@ conecta despues sin heredar nada del intento fallido de A.
   contraste contra una sesion autorizada por el Dispatcher. Se cierra cuando G2
   implemente el token firmado y `call_serve.py` lo valide en vez de confiar en el
   campo suelto.
+
+## 2026-08-29 - rama `feature/live-test-app`
+
+### D53. Excepcion justificada: se edito `transcriber.py` (M3) para mandar KeepAlive durante silencios
+
+CLAUDE.md es explicito: "si te encuentras editando... `transcriber.py`: PARA". Se
+investigo primero si el fix se podia hacer por composicion desde afuera, como
+`EchoGate`/`_ResilientTranslator`/`_ObservingCommitter` en v4 -- **no se pudo**. El
+motivo, verificado leyendo el codigo, no supuesto: el bucle que manda audio a Deepgram
+(`pump()`, dentro de `DeepgramStreamTranscriber.stream()`) es una funcion anidada
+**privada**, no un metodo. No hay atributo, ni clase, ni Protocol que envolver o
+heredar desde otro archivo -- la unica forma de tocar ese bucle es editando el archivo.
+
+Se le pregunto al usuario antes de tocar el archivo. Confirmo proceder.
+
+**El problema, medido en una sesion real (no simulado):** el gate (M2) no manda nada
+al `pump()` mientras no hay habla -- deliberado, es lo que hace que el costo de STT sea
+por minuto de habla y no de reloj. Pero un silencio real (la persona piensa, escucha al
+otro) deja el socket sin nada que enviar, y Deepgram lo cierra por inactividad:
+
+```
+WARNING sincro.transcriber: deepgram ws down (received 1011 (internal error)
+Deepgram did not receive audio data or a text message within the timeout window...)
+```
+
+**El cambio**, minimo y quirurgico: en `pump()`, el `await arrived.wait()` sin limite
+(esperaba indefinidamente al siguiente frame de audio) paso a `asyncio.wait_for(...,
+timeout=WS_KEEPALIVE_INTERVAL_S)` (5 s). Si se cumple el timeout sin que llegue audio
+nuevo, se manda `conn.send_keep_alive()` (metodo oficial del SDK de Deepgram para
+`/v1/listen`, no una construccion manual) y se vuelve a esperar. Si el propio
+`send_keep_alive()` fallara, el error sale por el `except Exception` que ya maneja
+reconexion con backoff (F6) -- no se traga silenciosamente.
+
+**Verificado, no supuesto:** script aparte que alimenta el transcriber con 1 s de
+"habla" (ruido, alcanza para probar la conexion) y despues 17 s de silencio real
+(mas largo que las pausas que causaban el corte en una sesion real):
+
+```
+reconnects: 0   keepalives_sent: 3   (a los 5s, 10s y 15s del silencio)
+```
+
+Antes del fix, ese mismo hueco de silencio disparaba una reconexion. `make check` y el
+resto de la suite de regresion (`ws-test`/`call-test` no tocan este camino con
+silencios largos, corren limpios igual) siguen pasando.
+
+Se anade `self.keepalives_sent` como contador publico, mismo patron que
+`reconnects`/`downtime_s`, para que quede visible en el resumen de sesion y no sea un
+mecanismo invisible.
+
+### Rechazado en el camino: "Estrategia A" (VAD nativo de Deepgram, sin VAD local)
+
+Antes de llegar al KeepAlive, se evaluo una propuesta externa mas grande: sacar el VAD
+local (Silero) y mandarle todo el audio a Deepgram sin filtrar, confiando en su propio
+endpointing. Rechazada con evidencia ya existente en este mismo archivo, no nueva:
+
+- La propuesta asumia que `endpointing=200` baja la espera de habla de ~800 ms a
+  200 ms. D38 ya midio lo contrario con n=40: el P90 empeora 616 ms.
+- La propuesta asumia que el VAD local anade retraso por el buffer de arranque
+  (front-clipping). `PREFIX_FRAMES` (240 ms) ya resuelve eso sin costo: es un buffer
+  rotatorio que se vacia de una sola vez al detectar habla, no una espera secuencial.
+- La propuesta asumia que sacar el VAD local reduce la latencia hacia Deepgram. D39 ya
+  lo midio: 1009 ms con gate contra 1023 ms sin el. Sin diferencia.
+
+Lo unico real de la propuesta -- que una conexion sin trafico se cae por inactividad --
+es justo lo que el KeepAlive arregla sin resignar el ahorro de costo de filtrar
+silencio antes de mandarlo a Deepgram.

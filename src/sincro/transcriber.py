@@ -185,6 +185,13 @@ WS_BUFFER_S: Final[float] = 30.0
 # pierde, que es justo lo que el criterio prohibe.
 WS_REPLAY_S: Final[float] = 10.0
 
+# El gate (M2) no manda nada mientras no hay habla: es deliberado, paga STT por minuto
+# de habla y no de reloj. Pero un silencio real (el hablante piensa, escucha al otro)
+# deja el socket sin nada que enviar, y Deepgram lo cierra por inactividad (1011
+# net0001), medido en vivo, no supuesto. Un KeepAlive sin audio real cada
+# WS_KEEPALIVE_INTERVAL_S evita el cierre sin fingir habla que no hubo.
+WS_KEEPALIVE_INTERVAL_S: Final[float] = 5.0
+
 
 class DeepgramStreamTranscriber:
     """M3 en streaming. SDK oficial de Deepgram, no el plugin de LiveKit (D13).
@@ -207,6 +214,7 @@ class DeepgramStreamTranscriber:
         self.frames_buffered = 0
         self.frames_replayed = 0
         self.frames_dropped_overflow = 0
+        self.keepalives_sent = 0
         self.downtime_s = 0.0
         self.connected = False
         # Segundos de audio enviados en total, sumando todas las conexiones. Deepgram
@@ -381,7 +389,17 @@ class DeepgramStreamTranscriber:
                                             await conn.send_close_stream()
                                         return
                                     arrived.clear()
-                                    await arrived.wait()
+                                    try:
+                                        await asyncio.wait_for(
+                                            arrived.wait(), timeout=WS_KEEPALIVE_INTERVAL_S
+                                        )
+                                    except TimeoutError:
+                                        # Silencio real, no un corte: nada que mandar
+                                        # salvo el KeepAlive. Si esto fallara, el error
+                                        # sale por el `except Exception` de mas abajo,
+                                        # que ya reconecta con backoff -- no se traga.
+                                        await conn.send_keep_alive()
+                                        self.keepalives_sent += 1
                                     continue
                                 f = pending.popleft()
                                 await conn.send_media(f.pcm.tobytes())
