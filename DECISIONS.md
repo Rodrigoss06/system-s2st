@@ -850,3 +850,387 @@ $ python -m sincro.live
   cargando turn-detector (local, primera vez tarda)...
   <ya no revienta, sigue a abrir el microfono>
 ```
+
+## 2026-08-29 - v4, G0
+
+### D43. R8 aplicado: `openai/gpt-oss-120b` con `reasoning_effort=low`, pero el gate de tokens de D8 NO se cumple
+
+R8 pedia migrar de `qwen/qwen3.6-27b` (tier Preview en Groq, no apto para produccion) a
+`gpt-oss-120b` (tier Production), verificando que el gate de D8 (<100 tokens de salida
+por clausula) siguiera en verde. **No sigue en verde**, y el motivo es mas grave que el
+costo: bajo presupuesto de bytes real, el segmento puede salir vacio.
+
+Primero, `reasoning_effort=none` **no es valido** para este modelo en Groq:
+
+```
+400 - `reasoning_effort` must be one of `low`, `medium`, or `high`
+```
+
+Con `reasoning_effort=low` y `SINCRO_LLM_MAX_TOKENS=200` (el valor heredado de qwen),
+`make dub-file` sobre `tests/fixtures/es_30s.wav` dio **142.8 tokens de salida por
+clausula** (objetivo <100) y **un segmento completamente vacio** (seg 2, `tokens_out=200`
+exacto, texto `''`): el motor lo trato como si no se hubiera dicho nada, cero audio para
+ese turno. No es ruido de una corrida: aislado y repetido con un script directo contra
+`GroqTranslator.translate()`, es 100% reproducible.
+
+Causa raiz, aislada variando el presupuesto de bytes del mismo segmento:
+
+```
+budget=999 (sin restriccion real): traduce bien, 32 tokens de salida
+budget=82  (el real, calculado)  : texto vacio, 200 tokens de salida (tope alcanzado)
+```
+
+Y variando `max_tokens` con el presupuesto ajustado (budget=82):
+
+```
+max_tokens=200 : vacio (corta a medias)
+max_tokens=400 : vacio (sigue cortando)
+max_tokens=800 : traduce bien -- pero 386 tokens de salida
+max_tokens=1500: traduce bien -- 419 tokens de salida
+```
+
+**El modelo, con `reasoning_effort=low`, gasta 300-400+ tokens de razonamiento invisible
+intentando resolver la restriccion de bytes del prompt antes de escribir la traduccion
+visible.** Con `max_tokens` insuficiente para terminar ese razonamiento, la respuesta
+visible sale vacia: una falla de correctitud silenciosa, no solo de costo o latencia.
+`reasoning_effort=medium` tiene el mismo comportamiento (probado, mismo resultado vacio
+con budget=82 y max_tokens=200).
+
+La nota de R8 en `STATE.md` ("gpt-oss-120b low... ya paso el gate de tokens, 28 de
+salida") se midio sin la restriccion real de bytes en el prompt: con budget suelto este
+mismo segmento tambien da un resultado bajo (32 tokens). El gate solo se rompe con
+presupuesto ajustado, que es la condicion real de produccion.
+
+**Decision del usuario: subir `SINCRO_LLM_MAX_TOKENS` a 800** en vez de revertir a qwen o
+seguir buscando otro modelo. Consecuencias aceptadas conscientemente, no un exito
+disfrazado:
+
+```
+make dub-file, mismo fixture, max_tokens=800:
+  seg 1: out=47   seg 2: out=411   seg 3: out=86
+  seg 4: out=83   seg 5: out=52    seg 6: out=82
+  promedio: 126.8 tokens/clausula   (objetivo <100: NO CUMPLE)
+  0 segmentos vacios, 0 fugas de marcadores, 6/6 traducciones correctas
+```
+
+El gate de D8 queda roto como excepcion documentada, no oculta. Highly variable: un
+segmento puede salir en 47 tokens y el de al lado en 411, segun cuanto "piense" el modelo
+sobre el presupuesto -- imprevisible por diseño de este modelo con razonamiento activado.
+
+**Lo que SI mejora, pese al gate roto:** el costo en dolares baja igual, porque el precio
+por token de gpt-oss-120b es mucho menor que el de qwen3.6-27b:
+
+```
+qwen3.6-27b     (evidencia F1 original): $0.001053 total, mismo fixture
+gpt-oss-120b/low (esta corrida)        : $0.000689 total, mismo fixture
+```
+
+**Lo que empeora:** el tramo LLM del TTFA. Mas tokens de salida es mas tiempo de
+generacion en el camino critico, y ahora es impredecible (47 a 411 tokens en el mismo
+fixture) en vez de estable como con qwen (15-18 tokens siempre). Esto se mide en G0 al
+comparar el TTFA por etapa contra la telemetria de F2.
+
+`.env` y `.env.example` quedan con `SINCRO_LLM_MODEL=openai/gpt-oss-120b`,
+`SINCRO_LLM_REASONING_EFFORT=low`, `SINCRO_LLM_MAX_TOKENS=800`, con un comentario que
+remite a esta decision.
+
+### D44. `adapters/ws_io.py`: cuatro decisiones que el contrato dejaba abiertas
+
+El contrato de Notion especifica el formato binario exacto, pero deja cuatro cosas sin
+resolver que hubo que decidir para implementar A1:
+
+**1. `flags.fin` no tiene ningun evento equivalente en el nucleo.** `DubbingEngine`
+expone `on_audio(chunk)` por cada trozo de audio de Fish, pero ningun callback avisa
+"este era el ultimo trozo del segmento" — `on_audio` no lo distingue. Tocar `engine.py`
+para anadir esa senal violaria "no toques el nucleo". Solucion: el motor SI expone
+`on_turn(TurnResult)`, que dispara una vez por segmento terminado, con o sin audio.
+`WebSocketAudioSink.end_utterance()` se cuelga de ese callback (no de `on_audio`) para
+rellenar el ultimo frame parcial con silencio y marcarlo `fin=1`. Es composicion en
+`ws_serve.py`, cero cambios en `engine.py`.
+
+**2. TTS a 16 kHz, no a 44100 Hz.** F2/F3 sintetizaban a 44100 Hz porque el destino era
+un altavoz local. El contrato exige 16 kHz mono en las dos direcciones del socket.
+`FishSynthesizer` ya acepta `sample_rate` como parametro (D9); en `ws_serve.py` se le
+pasa 16000 directamente. Cero resampleo, cero latencia anadida, cero codigo nuevo en
+M7 — es un valor de configuracion en la capa de composicion, no un cambio de contrato.
+
+**3. `TCP_NODELAY` no tiene parametro en `websockets.serve()`.** La libreria (v15, API
+`websockets.asyncio.*`) no expone un flag para esto. `connection.transport` es el
+`asyncio.Transport` real, guardado en `connection_made()` y ya usado por la propia
+libreria para `local_address`/`remote_address`; no es publico en `dir()` pero es estable.
+`enable_tcp_nodelay()` en `ws_io.py` hace
+`connection.transport.get_extra_info("socket").setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)`
+sobre cada conexion aceptada. Precedente: D14 ya entro a una clase interna de un plugin
+cuando la API publica no alcanzaba.
+
+**4. Backpressure de salida: cola acotada a 25 frames (~500 ms), descarte del mas
+viejo.** CLAUDE.md exige "descarte, nunca cola" pero no da un numero. 25 frames absorbe
+jitter normal de red sin acumular medio segundo de retardo audible si el cliente de
+verdad se atrasa. `frames_dropped` se cuenta y se loguea (nunca es un descarte
+silencioso). El limite es ajustable; no hay medicion todavia de cual es el optimo real
+contra un cliente movil.
+
+### D45. `make ws-test` corre servidor y cliente en el mismo proceso, no dos comandos
+
+El criterio de G0 (`make ws-test`) necesita un servidor WebSocket y un cliente
+simultaneos. En vez de dos targets de Makefile con un proceso en segundo plano (fragil
+en Windows sin `make` real, ver D40), `src/sincro/ws_test.py` levanta `ws_serve.run_server`
+como tarea de asyncio, corre el envio/recepcion del fixture en el mismo loop, y cierra
+el servidor al terminar. `tests/ws_client.py` se mantiene como herramienta aparte,
+reusable contra un servidor real en G3/G4, con su propia logica de envio/recepcion (algo
+de codigo duplicado con `ws_test.py`, pero evita que `src/sincro/` dependa de `tests/`).
+
+### D46. G0 verificado: el adaptador de WebSocket no anade latencia frente a F2
+
+`make ws-test` sobre `tests/fixtures/es_30s.wav`, comparado etapa por etapa contra un
+`make live --from-wav` recien corrido con la misma configuracion (mismo modelo post-D43,
+para que la unica variable sea el transporte):
+
+```
+etapa          F2 (console_io)   ws-test (ws_io)
+speech->stt        2947 ms           1065 ms
+stt->llm1           944 ms           1011 ms
+llm1->done           40 ms             37 ms
+done->tts1         2263 ms            630 ms
+tts1->out             0 ms              0 ms
+TOTAL (prom.)      6194 ms           2742 ms
+
+TTFA  F2: P50 6418  P90 8894  P99 9195 ms  (6 segmentos)
+      ws: P50 2496  P90 3708  P99 3854 ms  (5 segmentos)
+```
+
+Ninguna etapa empeora. `stt->llm1` sube 67 ms, dentro de la varianza normal de Groq ya
+documentada (D8, D38). El resto mejora, sobre todo `done->tts1`, que es varianza de Fish
+(ya caracterizada esta misma sesion: 300 ms a 7000 ms segun el momento, independiente del
+transporte).
+
+**Salvedad honesta sobre los 5 segmentos contra 6:** `tests/ws_client.py` no pausa el
+envio del WAV mientras el gate del servidor esta mudo — a proposito, porque un llamante
+real no tiene forma de saber que el otro extremo esta reproduciendo audio. El banco de
+F2 (`paced_wav()` en `live.py`) si pausa, porque ahi el "hablante" es un archivo y pausar
+evita que el WAV se superponga con su propio doblaje. Esa diferencia de metodologia
+cambia donde el committer corta las frases (4 `eou` + 1 `timeout` contra 3 `eou` + 2
+`timeout` + 1 `eou`), no la velocidad del adaptador. No se oculta: se anota.
+
+No se implemento CallSession ni M9 (G1), ni la API de control (G2), tal como se pidio.
+
+## 2026-08-29 - v4, G1
+
+### D47. `EchoGate` (M9) es subclase de `SileroGate`, no envoltorio -- y por que
+
+`DubbingEngine.__init__` tipa su parametro `gate` como `SileroGate` concreto, no como
+el Protocol `AudioGate` de `contracts.py` (que si bastaria estructuralmente). Un
+envoltorio de composicion (una clase nueva que solo *tuviera* un SileroGate adentro)
+habria chocado con ese tipo bajo `mypy --strict`, y arreglarlo bien --ensanchar el tipo
+a `AudioGate` en `engine.py`, y anadir `unmute_after_guard` al Protocol y al Fake en
+`contracts.py`/`fakes.py`-- son tres archivos del nucleo. Se penso en pausar y
+preguntar; en vez de eso se encontro una salida que no toca ningun archivo del nucleo:
+
+`EchoGate` **hereda** de `SileroGate`. `isinstance(echo_gate, SileroGate)` es cierto de
+verdad, `mypy --strict` lo acepta sin ignore, y `process()`/`load_eou()`/
+`eou_threshold`/`stats` funcionan tal cual estan en `gate.py` porque son heredados, no
+reimplementados. Solo se sobreescriben `mute()`, `unmute()` y `unmute_after_guard()`.
+
+Redirigirlos con `self.target.mute()` no sirve: `target` es OTRO `EchoGate`, cuyo
+`mute()` tambien esta redirigido -- A muta a B, B muta a A, A muta a B... recursion
+infinita, verificada al escribirlo (la primera version colgaba `make call-test` sin
+error, solo se agotaba el stack). La solucion es llamar al metodo **sin ligar** de
+`SileroGate` directamente sobre `target`: `SileroGate.mute(self.target)` ejecuta el
+"mutate a ti mismo" real -- pone `target.muted = True` en el propio `target` -- sin
+volver a pasar por el `mute()` sobreescrito de `target`. Es el mismo patron que D14 usa
+para llamar directo a una clase interna de un plugin cuando la API publica no alcanza,
+aplicado esta vez a codigo propio en vez de a una libreria de terceros.
+
+**Politica de interbloqueo** (pedida explicitamente en la tarea):
+
+- El estado de mute es por DIRECCION: cada `EchoGate` tiene su propio `muted`/
+  `mute_calls` heredados; no existe un mute global de la sesion.
+- `mute()`/`unmute()` son escrituras de atributo, no locks. Si los dos motores emiten a
+  la vez, cada uno escribe el `muted` del gate CONTRARIO sin esperar nada del otro lado:
+  no hay espera circular posible, no hay deadlock en el sentido de bloqueo mutuo.
+- Riesgo real, heredado sin cambios de `gate.py` (no arreglable sin tocar el nucleo):
+  `unmute_after_guard()` llama a `unmute()` de forma incondicional tras dormir 150 ms,
+  sin comprobar si un segundo segmento ya volvio a mutear el mismo gate mientras
+  dormia. Si un motor emite dos segmentos seguidos con menos de 150 ms entre el fin del
+  primero y el mute del segundo, el guard del primero puede desmutear a mitad de la
+  reproduccion del segundo. Ya existia en v3 (mismo mecanismo, self-mute); v4 solo lo
+  reubica de "un motor se desmutea de mas pronto" a "el gate del otro participante se
+  desmutea de mas pronto". No se disparo en `make call-test` (mute_calls==unmute_calls
+  limpio en las dos direcciones), pero no esta descartado para segmentos mas cortos y
+  seguidos que los de las corridas de prueba.
+
+### D48. Bug real: el `state` de una direccion se quedaba pegado en "speaking"
+
+Primera version de `_DirectionState.on_segment_committed`/`on_turn` en
+`call_session.py` mandaba `translating`/`idle` solo `if not gate.is_speaking`. Medido
+en `make call-test`: un lado de la llamada mostraba una secuencia rica
+(`speaking, translating, idle, translating, idle`) y el otro se quedaba en
+`['speaking']` para siempre, sin importar cuantos turnos completara. No era aleatorio
+ni dependia de que idioma fuera: dependia de que participante conectaba primero.
+
+Causa: `gate.is_speaking` (heredado de SileroGate, `_speaking` del watcher VAD) exige
+`min_silence_duration` (550 ms por defecto) de silencio sostenido para bajar a `False`.
+El committer puede cerrar un segmento por otras senales (`eou`, `punctuation`,
+`timeout`) **antes** de que ese silencio se cumpla. Resultado: en el momento en que
+`on_segment_committed`/`on_turn` se ejecutan, `gate.is_speaking` casi siempre sigue en
+`True` todavia -- la condicion de guarda estaba, en la practica, siempre cerrada. Un
+lado "se salvaba" por azar de temporizacion (pausas mas largas entre frases en un
+fixture que en el otro); el otro nunca.
+
+Corregido quitando la guarda: `on_segment_committed` manda `translating` y `on_turn`
+manda `idle` sin condicion. El commit YA es la senal autoritativa de fin de turno; no
+hace falta corroborarla con una senal de VAD que se demora mas en bajar. Reverificado:
+las dos direcciones muestran secuencias largas y variadas de `state`, sin repetidos
+seguidos ni `idle` antes de cualquier `speaking`.
+
+### D49. `make call-test` necesita WAV de duracion parecida, o un lado "cuelga" primero
+
+Primera corrida uso `tests/fixtures/matrix_en.wav` (41.87 s, 10 frases) contra
+`tests/fixtures/es_30s.wav` (35.16 s, 6 frases) con el mismo `--tail-s` para los dos
+clientes. El participante mas corto cierra su conexion antes; `CallSession.run()` usa
+`asyncio.wait(..., FIRST_COMPLETED)` y cancela la direccion sobreviviente en cuanto la
+otra termina -- exactamente lo que el contrato pide ("un lado cuelga, la sesion
+termina, `peer_left` al otro"), pero corta la medida del lado mas largo a la mitad
+(4 turnos en vez de los ~10 esperados, y su canal de `state` se corta con el).
+
+No es un bug de `CallSession`: es un requisito del arnes de prueba. Se genero
+`tests/fixtures/matrix_en_35s.wav` (recorte a 35.0 s del `matrix_en.wav` existente, sin
+gastar cuota de Fish) para igualar duraciones. `WAV_EN`/`WAV_ES` en el Makefile quedan
+configurables; quien use `make call-test` con fixtures propios debe igualar la duracion
+o aceptar que el mas corto termina la llamada primero.
+
+## 2026-08-29 - v4, correccion de call_serve.py antes de abrir G2
+
+### ACLARACION. Dispatcher y Worker son dos servicios, no uno -- `call_serve.py` esta bien como esta
+
+Al leer la tarea de G2 crei que `call_serve.py` (`websockets.serve()` sin HTTP) tenia
+que crecer para servir tambien `POST /v1/sessions`, `DELETE /v1/sessions/{id}` y
+`POST /v1/voices`. Investigue si eso era viable con la libreria `websockets` y **no lo
+es**: su parser HTTP/1.1 rechaza cualquier metodo que no sea GET antes de que el hook
+`process_request` pueda intervenir (verificado en el codigo fuente, no supuesto):
+
+```
+.venv/Lib/site-packages/websockets/http11.py:150-151
+    if method != b"GET":
+        raise ValueError(f"unsupported HTTP method; expected GET; got {d(method)}")
+```
+
+El usuario aclaro que esto no bloqueaba nada: el contrato de Notion describe **dos
+servicios** en Container Apps separadas, no uno:
+
+- **Dispatcher** (FastAPI, puerto 8080 propio): `POST /v1/sessions`,
+  `DELETE /v1/sessions/{id}`, `POST /v1/voices`, `GET /v1/voices/{user_id}`, OpenAPI.
+- **Worker** (`websockets.serve()`, puerto 8080 propio, otra Container App):
+  `WS /v1/stream`, `GET /healthz`, `GET /readyz` -- las dos ultimas son GET, van por
+  `process_request` sin problema.
+
+El documento de contrato lista los endpoints en una sola tabla (seccion 4) sin separar
+por servicio explicitamente, pero el propio ejemplo de `POST /v1/sessions` ya daba por
+supuesta la separacion: devuelve un `ws_url` que apunta a `worker-1.sincro....`, un
+FQDN distinto al del dispatcher. **`call_serve.py` no necesita ningun cambio**: ya es
+el Worker completo. El Dispatcher (S1, FastAPI, S2 VoiceRepository) se construye aparte
+en G2 sin tocar este archivo. Se registra como ACLARACION porque no cambia ni el
+contrato ni el codigo -- corrige una lectura mia de la tabla, no una decision de diseno.
+
+### D50. `TCP_NODELAY` ya esta activo por defecto -- verificado en el codigo fuente de asyncio, no en `websockets`
+
+`call_serve.py` no llama a `enable_tcp_nodelay()` en ningun lado, a diferencia de
+`CallSession.__init__` (que si lo hace sobre las dos conexiones antes de construir los
+motores). Verificado si hacia falta anadirlo tambien aqui, en vez de asumir que no:
+
+```
+C:\...\Python313\Lib\asyncio\base_events.py:192-197
+    if hasattr(socket, 'TCP_NODELAY'):
+        def _set_nodelay(sock):
+            if (sock.family in {socket.AF_INET, socket.AF_INET6} and
+                    sock.type == socket.SOCK_STREAM and
+                    sock.proto == socket.IPPROTO_TCP):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+C:\...\Python313\Lib\asyncio\selector_events.py:942 (_SelectorSocketTransport.__init__)
+    base_events._set_nodelay(self._sock)
+
+C:\...\Python313\Lib\asyncio\proactor_events.py:611 (_ProactorSocketTransport)
+    base_events._set_nodelay(sock)
+```
+
+`_set_nodelay` se llama sin condicion en el `__init__` de la transport de socket, para
+**toda** conexion TCP que asyncio crea -- tanto las que el propio proceso abre
+(`create_connection`) como las que acepta un servidor (`create_server`, que es
+exactamente el camino de `websockets.serve()`). Se aplica en las dos implementaciones
+de event loop de CPython: `_SelectorSocketTransport` (Linux/macOS/Windows-selector) y
+`_ProactorSocketTransport` (Windows, el loop por defecto ahi). No es la libreria
+`websockets` la que lo activa -- es asyncio, por debajo, siempre.
+
+**Consecuencia:** ninguna conexion de `call_serve.py` necesita activarlo a mano; ya
+esta activo desde que la transport se crea, antes de que el primer byte se envie.
+`enable_tcp_nodelay()` en `CallSession.__init__` (D44/G0) no estaba mal -- es
+defensivo, y protege contra un event loop de terceros (p.ej. `uvloop`) que no
+garantice lo mismo -- pero era redundante contra el asyncio stock de CPython. Se deja
+tal cual (explicito no estorba); no se anade una segunda llamada en `call_serve.py`
+porque no hay nada que activar ahi que no este activo ya.
+
+### D51. Bug critico corregido: `_wait_for_peer` desconectaba al primer participante a los 60 s, en plena llamada
+
+`await asyncio.sleep(PAIR_TIMEOUT_S)` en `_wait_for_peer` no se cancelaba cuando el
+segundo participante llegaba. Secuencia real del fallo: A conecta y su handler entra
+en el sleep de 60 s; B conecta 5 s despues y `_start_session` arranca la llamada
+**en el handler de B**; el handler de A sigue durmiendo los 55 s restantes sin saber
+que ya hay sesion; al despertar ve que `_waiting` ya no es suyo, `handle()` retorna, y
+`websockets.serve()` cierra la conexion de A automaticamente porque su handler
+termino. Resultado: A se cae a los 60 s exactos de conectar, sin importar que la
+llamada siguiera activa. En produccion se habria visto como un problema de red o de
+Azure sin serlo.
+
+Corregido reestructurando el emparejamiento con un `asyncio.Event` (`paired`) y un
+`asyncio.Future` (`finished`) por participante en espera:
+
+- El que llega primero espera `paired.wait()` con `asyncio.wait_for(..., PAIR_TIMEOUT_S)`
+  en vez de un `sleep` ciego: si el segundo llega antes, `paired.set()` interrumpe la
+  espera de inmediato, no a los 60 s.
+- Tras emparejar, el handler del primero se queda vivo en `await finished` mientras
+  dura la sesion entera, en vez de retornar y dejar que la libreria cierre su socket.
+- `_start_session` marca `finished` en un `finally`, así que si `CallSession(...)` o
+  `session.run()` lanzan excepcion, el primero se libera igual -- no se queda colgado
+  esperando un `finished` que nunca llegaria.
+
+Verificado con una prueba nueva (`tests/test_lobby_pairing.py`, sin motores reales, sin
+tocar Deepgram/Groq/Fish): A conecta, B conecta a los 5 s, la "llamada" (con
+`CallSession` reemplazado por un doble que solo duerme) dura 95 s. A sigue con
+`ws.state == State.OPEN` a los 70 s (mas de los 60 s del bug original) y hasta el final
+de los 95 s. Antes de la correccion esta prueba no existia porque el bug no se habia
+detectado; ahora queda como regresion permanente.
+
+### D52. Dos bugs menores corregidos junto con D51, mismo archivo
+
+- **Validacion de `lang` en el sitio equivocado.** `_participant()` validaba `lang`
+  dentro de `_start_session`, que corre en el handler de **B**, fuera del
+  `try/except` que `handle()` pone alrededor de `_read_hello()`. Si A mandaba un
+  `lang` invalido, la excepcion saltaba recien cuando B se conectaba, dejando las DOS
+  conexiones sin resolver. Movida la validacion (contra `SUPPORTED_LANGS`, no solo
+  `isinstance(str)`) a `_read_hello()`, donde el `try/except` de cada participante ya
+  la cubre individualmente.
+- **`json.loads` puede devolver algo que no es dict.** `"null"`, `"[1,2]"` o `"42"` son
+  JSON validos; `msg.get(...)` sobre eso lanza `AttributeError`, que no estaba en el
+  `except` de `handle()`. Anadido `isinstance(msg, dict)` en `_read_hello()`.
+
+Verificado con la segunda prueba de `tests/test_lobby_pairing.py`: A manda
+`{"t":"hello","lang":"xx"}`, su conexion se cierra limpiamente (no se cuelga), y B
+conecta despues sin heredar nada del intento fallido de A.
+
+### Deudas anotadas, no resueltas en esta correccion
+
+- **Para G4**: el `Lobby` tiene un solo hueco de espera (`_SLOT_KEY` fijo) y empareja
+  por orden de llegada, sin verificar que las dos conexiones pertenezcan a la misma
+  llamada. Con 5 slots simultaneos, el participante A de la llamada 1 se emparejaria
+  con el A de la llamada 2. `_waiting` ya quedo como `dict[str, _Waiting]` en vez de un
+  slot unico precisamente para que G4 no tenga que reescribir el `Lobby` entero: solo
+  necesita indexar por `session_id` en vez de la constante `_SLOT_KEY`.
+- **Para G2**: `_participant()` lee `lang` directamente del `hello`. El contrato
+  (seccion 8) pone el idioma en el **token firmado**, no en el `hello`, precisamente
+  para que el cliente no pueda cambiarlo a mitad de sesion. Esto **es una desviacion
+  real del contrato**, no una simplificacion inocua -- hoy cualquier cliente que hable
+  el protocolo puede mandar el `lang` que quiera en su `hello` sin que nada lo
+  contraste contra una sesion autorizada por el Dispatcher. Se cierra cuando G2
+  implemente el token firmado y `call_serve.py` lo valide en vez de confiar en el
+  campo suelto.

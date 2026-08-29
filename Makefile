@@ -21,7 +21,7 @@ define NOT_IMPLEMENTED
 	 exit 1
 endef
 
-.PHONY: help setup check dub-file live enroll enroll-delete drift-test matrix-test soak report lint clean
+.PHONY: help setup check dub-file live enroll enroll-delete drift-test matrix-test soak ws-test call-test api-test openapi report lint clean
 
 help:
 	@echo "SINCRO Engine v3 - targets"
@@ -36,6 +36,11 @@ help:
 	@echo "  make matrix-test           F5  Los 20 pares dirigidos"
 	@echo "  make soak MIN=20           F6  Sesion larga con corte de red (CUT_AT=, WAV=)"
 	@echo "  make report                    Agrega el JSONL: P50 P90 P99, triggers, deriva, coste"
+	@echo ""
+	@echo "  make ws-test               G0  Una direccion end to end por WebSocket (FIXTURE=, PORT=, TAIL_S=)"
+	@echo "  make call-test             G1  Llamada bidireccional simulada (WAV_EN=, WAV_ES=, PORT=, TAIL_S=)"
+	@echo "  make api-test              G2  Cada endpoint del contrato + tabla de degradacion"
+	@echo "  make openapi                   Genera openapi.json del Dispatcher (referencia ejecutable)"
 	@echo ""
 	@echo "  make lint                  ruff + mypy strict"
 	@echo "  make clean                 Borra out/ y caches"
@@ -97,6 +102,25 @@ soak:
 report:
 	$(REQUIRE_VENV)
 	$(PY) -m sincro.report $(if $(FILE),--file "$(FILE)",)
+
+ws-test:
+	$(REQUIRE_VENV)
+	$(PY) -m sincro.ws_test $(if $(FIXTURE),--fixture "$(FIXTURE)",) $(if $(PORT),--port $(PORT),) $(if $(TAIL_S),--tail-s $(TAIL_S),)
+
+WAV_EN ?= tests/fixtures/matrix_en_35s.wav
+WAV_ES ?= tests/fixtures/es_30s.wav
+
+call-test:
+	$(REQUIRE_VENV)
+	$(PY) -m sincro.call_test --wav-en "$(WAV_EN)" --wav-es "$(WAV_ES)" $(if $(PORT),--port $(PORT),) $(if $(TAIL_S),--tail-s $(TAIL_S),)
+
+api-test:
+	$(REQUIRE_VENV)
+	$(PY) -m sincro.api_test
+
+openapi:
+	$(REQUIRE_VENV)
+	$(PY) -m sincro.openapi_gen
 
 lint:
 	$(REQUIRE_VENV)
