@@ -53,7 +53,9 @@ COPY src/ src/
 COPY pyproject.toml .
 
 # Instalar el paquete en modo editable dentro del venv copiado
-RUN /opt/venv/bin/pip install -e ".[dev]" --no-deps
+# uv venv no incluye pip; usamos uv pip install directamente
+COPY --from=builder /usr/local/bin/uv /usr/local/bin/uv
+RUN uv pip install --python /opt/venv/bin/python -e ".[dev]" --no-deps
 
 # El turn-detector descarga sus modelos a ~/.local/share/livekit/agents/
 # por defecto. Los copiamos desde el builder.
