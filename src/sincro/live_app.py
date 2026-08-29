@@ -15,6 +15,10 @@ Auriculares obligatorios, igual que `make live`: el aviso aparece ANTES de abrir
 microfono, con un dialogo que hay que confirmar (CLAUDE.md, "nunca desactivar la
 segunda defensa porque tengo auriculares").
 
+Par de idiomas elegible en la ventana (los 5 de `config.SUPPORTED_LANGS`, los mismos 20
+pares dirigidos que F5 ya midio), no fijo al `.env`: dos combos de solo lectura, con
+`dataclasses.replace()` sobre el `Settings` cargado antes de construir el motor.
+
 Uso: .venv/bin/python -m sincro.live_app
 """
 
@@ -22,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import os
 import queue
 import sys
@@ -32,7 +37,7 @@ from typing import Any
 
 from .adapters.console_io import MicrophoneSource, SpeakerSink, check_devices
 from .committer import StreamingCommitter
-from .config import Settings, load_settings
+from .config import SUPPORTED_LANGS, Settings, load_settings
 from .contracts import DubbedChunk
 from .engine import DubbingEngine, TurnResult
 from .gate import DEFAULT_MIN_SILENCE, SileroGate
@@ -71,7 +76,7 @@ def _fix_tcl_tk_library() -> None:
 _fix_tcl_tk_library()
 
 import tkinter as tk  # noqa: E402 (tiene que ir despues de _fix_tcl_tk_library)
-from tkinter import messagebox, scrolledtext  # noqa: E402
+from tkinter import messagebox, scrolledtext, ttk  # noqa: E402
 
 TTS_SAMPLE_RATE = 44_100
 
@@ -203,6 +208,26 @@ class LiveApp:
         self.status_var = tk.StringVar(value="Detenido")
         tk.Label(root, textvariable=self.status_var, font=("Segoe UI", 12, "bold")).pack(pady=6)
 
+        # Los 5 idiomas del contrato (config.SUPPORTED_LANGS), no solo el par fijo del
+        # .env: F5 ya midio los 20 pares dirigidos, la demo deberia poder probarlos
+        # todos sin editar variables de entorno.
+        lang_frame = tk.Frame(root)
+        lang_frame.pack(pady=4)
+        tk.Label(lang_frame, text="Hablo en:").pack(side="left", padx=(0, 4))
+        self.src_var = tk.StringVar(value="es")
+        self.src_combo = ttk.Combobox(
+            lang_frame, textvariable=self.src_var, values=SUPPORTED_LANGS,
+            state="readonly", width=6,
+        )
+        self.src_combo.pack(side="left", padx=4)
+        tk.Label(lang_frame, text="  Traducir a:").pack(side="left", padx=(8, 4))
+        self.dst_var = tk.StringVar(value="en")
+        self.dst_combo = ttk.Combobox(
+            lang_frame, textvariable=self.dst_var, values=SUPPORTED_LANGS,
+            state="readonly", width=6,
+        )
+        self.dst_combo.pack(side="left", padx=4)
+
         btn_frame = tk.Frame(root)
         btn_frame.pack(pady=4)
         self.start_btn = tk.Button(btn_frame, text="Iniciar", width=14, command=self.on_start)
@@ -216,6 +241,9 @@ class LiveApp:
         tk.Checkbutton(
             root, text="Voz neutra (en vez de la clonada)", variable=self.neutral_var
         ).pack()
+
+        self._src_lang: str = "es"
+        self._dst_lang: str = "en"
 
         self.log = scrolledtext.ScrolledText(root, wrap="word", height=26)
         self.log.pack(fill="both", expand=True, padx=8, pady=8)
@@ -233,6 +261,13 @@ class LiveApp:
         self.log.configure(state="disabled")
 
     def on_start(self) -> None:
+        src, dst = self.src_var.get(), self.dst_var.get()
+        if src == dst:
+            messagebox.showerror(
+                "Error", "El idioma de origen y el de destino no pueden ser el mismo."
+            )
+            return
+
         confirmed = messagebox.askyesno(
             "Auriculares obligatorios",
             "El microfono y el altavoz estan en la misma maquina.\n\n"
@@ -252,10 +287,16 @@ class LiveApp:
 
         try:
             settings = load_settings()
+            # El .env fija un par por defecto (M1, decision de diseno desde v3: sin
+            # autodeteccion); el combo de la demo elige entre los 5 idiomas ya
+            # soportados (SUPPORTED_LANGS), no agrega ninguno nuevo.
+            settings = dataclasses.replace(settings, src_lang=src, dst_lang=dst)  # type: ignore[arg-type]
         except Exception as e:
             messagebox.showerror("Error de configuracion", f"{type(e).__name__}: {e}")
             return
 
+        self._src_lang, self._dst_lang = src, dst
+        self._append(f"[idiomas] {src} -> {dst}")
         self._append(
             f"[modelo] {settings.llm_model}  reasoning_effort={settings.llm_reasoning_effort}"
         )
@@ -263,6 +304,8 @@ class LiveApp:
         self._thread.start()
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
+        self.src_combo.configure(state="disabled")
+        self.dst_combo.configure(state="disabled")
 
     def on_stop(self) -> None:
         if self._thread is not None:
@@ -294,8 +337,8 @@ class LiveApp:
             else:
                 tag = ""
             self._append(f"\n[{p['trigger']}] TTFA {p['ttfa_ms']} ms{tag}")
-            self._append(f"  es: {p['src']}")
-            self._append(f"  en: {p['dst']}")
+            self._append(f"  {self._src_lang}: {p['src']}")
+            self._append(f"  {self._dst_lang}: {p['dst']}")
         elif event.kind == "summary":
             p = event.payload
             self._append("\n--- resumen de la sesion ---")
@@ -307,10 +350,14 @@ class LiveApp:
             self._append(f"triggers: {p.get('triggers', {})}")
             self.start_btn.configure(state="normal")
             self.stop_btn.configure(state="disabled")
+            self.src_combo.configure(state="readonly")
+            self.dst_combo.configure(state="readonly")
         elif event.kind == "error":
             messagebox.showerror("Error", event.payload["message"])
             self.start_btn.configure(state="normal")
             self.stop_btn.configure(state="disabled")
+            self.src_combo.configure(state="readonly")
+            self.dst_combo.configure(state="readonly")
 
 
 def main() -> int:
