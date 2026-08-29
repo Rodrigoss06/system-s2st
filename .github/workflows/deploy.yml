@@ -32,9 +32,9 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
-      - run: uv pip install --system -e ".[dev]"
-      - run: ruff check src/
-      - run: mypy
+      - run: uv sync --dev
+      - run: uv run ruff check src/
+      - run: uv run mypy
 
   build-and-deploy:
     needs: lint
