@@ -325,7 +325,7 @@ if __name__ == "__main__":
     ap.add_argument("--port", type=int, default=8080)
     args = ap.parse_args()
 
-    async def _main() -> int:
+    async def _main() -> None:
         s = load_settings()
         writer = TelemetryWriter()
         server = await run_call_server(args.host, args.port, s, writer)
